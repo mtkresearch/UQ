@@ -383,7 +383,7 @@ class HuggingfaceModel(BaseModel):
                 )
             last_input = hidden[-1]
         else:
-            last_input = hidden[n_generated - 1]
+            last_input = hidden[n_generated ] #fixed bug
 
         # Then access last layer for input
         last_layer = last_input[-1]
