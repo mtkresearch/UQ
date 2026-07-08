@@ -120,10 +120,15 @@ class HuggingfaceModel(BaseModel):
             llama65b = '65b' in model_name.lower() and base == 'huggyllama'
             llama2or3_70b = '70b' in model_name.lower() and base == 'meta-llama'
 
+            # if ('7b' in model_name or '13b' in model_name) or eightbit:
+            #     self.model = AutoModelForCausalLM.from_pretrained(
+            #         f"{base}/{model_name}", device_map="auto",
+            #         max_memory={0: '80GIB'}, **kwargs,)
             if ('7b' in model_name or '13b' in model_name) or eightbit:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    f"{base}/{model_name}", device_map="auto",
-                    max_memory={0: '80GIB'}, **kwargs,)
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        f"{base}/{model_name}", device_map="auto",
+                        max_memory={0: '22GIB', 1: '22GIB', 2: '22GIB', 3: '22GIB'},
+                        **kwargs,)
 
             elif llama2or3_70b or llama65b:
                 path = snapshot_download(

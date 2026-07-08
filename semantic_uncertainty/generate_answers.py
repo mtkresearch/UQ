@@ -38,7 +38,7 @@ def main(args):
     torch.cuda.manual_seed_all(args.random_seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=True)
     try:
         from transformers import set_seed
         set_seed(args.random_seed)
