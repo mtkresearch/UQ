@@ -232,7 +232,22 @@ class HuggingfaceModel(BaseModel):
         #   "-1"  = last generated token
         #   "-2"  = second-last generated token
         if latent_token_positions is None:
-            latent_token_positions = ["tbg", "0", "-2", "-1"]
+            #latent_token_positions = ["tbg", "0", "-2", "-1"]
+            latent_token_positions = [
+    "tbg",   # token before generation / prompt final state
+
+    "0",     # first generated token
+    "1",     # second generated token
+    "2",     # third generated token
+    # "3",     # fourth generated token
+    # "4",     # fifth generated token
+
+    # "-5",    # fifth-last generated token
+    # "-4",    # fourth-last generated token
+    "-3",    # third-last generated token
+    "-2",    # second-last generated token
+    "-1",    # last generated token
+]
         self.latent_token_positions = [str(p).strip() for p in latent_token_positions]
 
     
