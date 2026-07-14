@@ -376,7 +376,7 @@ class HuggingfaceModel(BaseModel):
                 full_answer,
                 )
             last_input = hidden[0]
-        elif ((n_generated - 1) >= len(hidden)):
+        elif n_generated >= len(hidden):
             # if access idx is larger/equal
             logging.error(
                 'Taking last state because n_generated is too large'
@@ -388,7 +388,7 @@ class HuggingfaceModel(BaseModel):
                 )
             last_input = hidden[-1]
         else:
-            last_input = hidden[n_generated - 1]
+            last_input = hidden[n_generated] #fix bug it was n_generated -1
 
         # Then access last layer for input
         last_layer = last_input[-1]

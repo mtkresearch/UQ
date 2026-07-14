@@ -145,3 +145,4 @@ wandb_runs/
 
 .env
 
+semantic_uncertainty/run_log*.txt
