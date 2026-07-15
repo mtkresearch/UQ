@@ -1,0 +1,98 @@
+{
+  "trivia_qa": {
+    "gen_path": "sep_scratch/shards/Qwen3-8B_trivia_qa_20260711_155030/merged/gpu_mtk53686/uncertainty/wandb/latest-run/files/validation_generations.pkl",
+    "token": "slt",
+    "n": 2000,
+    "se_threshold": 0.8140452349615312,
+    "se_base_rate": 0.321,
+    "error_rate": 0.506,
+    "probe": {
+      "se_detection": {
+        "layer": 36,
+        "auroc": 0.8544145912566966
+      },
+      "error_detection": {
+        "layer": 35,
+        "auroc": 0.7679666666666667
+      }
+    },
+    "free_scalars": {
+      "u_first": {
+        "se_detection_auroc": 0.6867460025354761,
+        "error_detection_auroc": 0.607211111111111
+      },
+      "u_mean": {
+        "se_detection_auroc": 0.6863166073692388,
+        "error_detection_auroc": 0.6074999999999999
+      },
+      "u_min": {
+        "se_detection_auroc": 0.6870254501833448,
+        "error_detection_auroc": 0.6073444444444444
+      }
+    }
+  },
+  "squad": {
+    "gen_path": "sep_scratch/shards/Qwen3-8B_squad_20260711_202452/merged/gpu_mtk53686/uncertainty/wandb/latest-run/files/validation_generations.pkl",
+    "token": "slt",
+    "n": 2000,
+    "se_threshold": 0.9535958466520794,
+    "se_base_rate": 0.48,
+    "error_rate": 0.736,
+    "probe": {
+      "se_detection": {
+        "layer": 23,
+        "auroc": 0.8152182378531136
+      },
+      "error_detection": {
+        "layer": 34,
+        "auroc": 0.6795634920634921
+      }
+    },
+    "free_scalars": {
+      "u_first": {
+        "se_detection_auroc": 0.6947952246909734,
+        "error_detection_auroc": 0.6048555996472663
+      },
+      "u_mean": {
+        "se_detection_auroc": 0.691212630314089,
+        "error_detection_auroc": 0.6009493496472663
+      },
+      "u_min": {
+        "se_detection_auroc": 0.6974932965431302,
+        "error_detection_auroc": 0.6061852402998237
+      }
+    }
+  },
+  "nq": {
+    "gen_path": "sep_scratch/shards/Qwen3-8B_nq_20260711_214404/merged/gpu_mtk53686/uncertainty/wandb/latest-run/files/validation_generations.pkl",
+    "token": "slt",
+    "n": 2000,
+    "se_threshold": 0.9535958466520794,
+    "se_base_rate": 0.405,
+    "error_rate": 0.668,
+    "probe": {
+      "se_detection": {
+        "layer": 21,
+        "auroc": 0.8251839571220931
+      },
+      "error_detection": {
+        "layer": 33,
+        "auroc": 0.7499839987711054
+      }
+    },
+    "free_scalars": {
+      "u_first": {
+        "se_detection_auroc": 0.6758437045784884,
+        "error_detection_auroc": 0.6093011943317246
+      },
+      "u_mean": {
+        "se_detection_auroc": 0.6752305141715116,
+        "error_detection_auroc": 0.6092051869583583
+      },
+      "u_min": {
+        "se_detection_auroc": 0.6770871184593024,
+        "error_detection_auroc": 0.6100756538102126
+      }
+    }
+  }
+}
