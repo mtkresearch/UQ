@@ -10,10 +10,10 @@ import torch
 import openai
 import wandb
 
-from uncertainty.data.data_utils import load_ds
-from uncertainty.utils import utils
-from uncertainty.uncertainty_measures import p_true as p_true_utils
-from compute_uncertainty_measures import main as main_compute
+from sep.uncertainty.data.data_utils import load_ds
+from sep.uncertainty.utils import utils
+from sep.uncertainty.uncertainty_measures import p_true as p_true_utils
+from sep.compute_uncertainty_measures import main as main_compute
 
 
 utils.setup_logger()
@@ -138,10 +138,20 @@ def main(args):
 
         # Evaluate over random subset of the datasets.
         indices = random.sample(possible_indices, min(args.num_samples, len(dataset)))
-        experiment_details[dataset_split] = {'indices': indices}
 
         if args.num_samples > len(dataset):
             logging.warning('Not enough samples in dataset. Using all %d samples.', len(dataset))
+
+        # Data-parallel sharding: every process samples the same seeded `indices`,
+        # then keeps only its disjoint stride. Merged results reproduce the
+        # single-process run exactly.
+        if args.num_shards > 1:
+            indices = indices[args.shard_index::args.num_shards]
+            logging.info(
+                'Shard %d/%d handling %d of the sampled %s indices.',
+                args.shard_index, args.num_shards, len(indices), dataset_split)
+
+        experiment_details[dataset_split] = {'indices': indices}
 
         it = 0
         for index in tqdm(indices):
@@ -169,57 +179,60 @@ def main(args):
             # be used to estimate the entropy.
 
             if dataset_split == 'train' and args.get_training_set_generations_most_likely_only:
-                num_generations = 1
+                num_high_temp = 0
             else:
-                num_generations = args.num_generations + 1
+                num_high_temp = args.num_generations
 
-            for i in range(num_generations):
+            # Low-temperature most-likely answer: needs latents for probe training.
+            predicted_answer, token_log_likelihoods, (embedding, emb_before_eos, emb_last_before_gen) = model.predict(
+                local_prompt, 0.1, return_latent=True)
+            embedding = embedding.cpu() if embedding is not None else None
+            emb_last_before_gen = emb_last_before_gen.cpu() if emb_last_before_gen is not None else None
+            emb_before_eos = emb_before_eos.cpu() if emb_before_eos is not None else None
 
-                # Temperature for first generation is always `0.1`.
-                temperature = 0.1 if i == 0 else args.temperature
+            if correct_answer:
+                acc = metric(predicted_answer, example, model)
+            else:
+                acc = 0.0  # pylint: disable=invalid-name
 
-                predicted_answer, token_log_likelihoods, (embedding, emb_last_before_gen, emb_before_eos) = model.predict(local_prompt, temperature, return_latent=True) 
-                
-                # Last token embedding
-                embedding = embedding.cpu() if embedding is not None else None
-                emb_last_before_gen = emb_last_before_gen.cpu() if emb_last_before_gen is not None else None
-                emb_before_eos = emb_before_eos.cpu() if emb_before_eos is not None else None
-                
-                compute_acc = args.compute_accuracy_at_all_temps or (i == 0)
-                if correct_answer and compute_acc:
-                    acc = metric(predicted_answer, example, model)
-                else:
-                    acc = 0.0  # pylint: disable=invalid-name
+            logging.info('Iteration ' + str(it) + ':  ' + 80*'#')
+            if args.use_context:
+                logging.info('context: '.ljust(15) + str(context))
+            logging.info('question: '.ljust(15) + question)
+            logging.info('low-t prediction: '.ljust(15) + predicted_answer)
+            logging.info('correct answer: '.ljust(15) + str(correct_answer))
+            logging.info('accuracy: '.ljust(15) + str(acc))
 
-                if i == 0:
-                    # Logging.
-                    logging.info('Iteration ' + str(it) + ':  ' + 80*'#')
-                    if args.use_context:
-                        logging.info('context: '.ljust(15) + str(context))
-                    logging.info('question: '.ljust(15) + question)
-                    logging.info('low-t prediction: '.ljust(15) + predicted_answer)
-                    logging.info('correct answer: '.ljust(15) + str(correct_answer))
-                    logging.info('accuracy: '.ljust(15) + str(acc))
+            accuracies.append(acc)
+            most_likely_answer_dict = {
+                'response': predicted_answer,
+                'token_log_likelihoods': token_log_likelihoods,
+                'embedding': embedding,
+                'accuracy': acc,
+                'emb_last_tok_before_gen': emb_last_before_gen,
+                'emb_tok_before_eos': emb_before_eos,
+            }
 
-                    accuracies.append(acc)
-                    most_likely_answer_dict = {
-                        'response': predicted_answer,
-                        'token_log_likelihoods': token_log_likelihoods,
-                        'embedding': embedding,
-                        'accuracy': acc,
-                        'emb_last_tok_before_gen': emb_last_before_gen,
-                        'emb_tok_before_eos': emb_before_eos, 
-                    }
+            generations[example['id']].update({
+                'most_likely_answer': most_likely_answer_dict,
+                'reference': utils.get_reference(example),
+            })
 
-                    generations[example['id']].update({
-                        'most_likely_answer': most_likely_answer_dict,
-                        'reference': utils.get_reference(example),
-                    })
-                else:
-                    logging.info('high-t prediction '.ljust(15) + str(i) + ' : ' + predicted_answer)
-                    # Aggregate predictions over num_generations.
+            # High-temperature samples for the semantic-entropy estimate: sampled
+            # in a single batched call, no hidden states (unused downstream).
+            if num_high_temp > 0:
+                batch = model.predict_batch(
+                    local_prompt, args.temperature, num_high_temp)
+                for i, (ht_answer, ht_log_likelihoods) in enumerate(batch, start=1):
+                    if correct_answer and args.compute_accuracy_at_all_temps:
+                        ht_acc = metric(ht_answer, example, model)
+                    else:
+                        ht_acc = 0.0  # pylint: disable=invalid-name
+                    logging.info('high-t prediction '.ljust(15) + str(i) + ' : ' + ht_answer)
+                    # embedding kept as None for compatibility with the (text,
+                    # log_liks, embedding, acc) tuple layout consumed downstream.
                     full_responses.append(
-                        (predicted_answer, token_log_likelihoods, embedding, acc))
+                        (ht_answer, ht_log_likelihoods, None, ht_acc))
 
             # Append all predictions for this example to `generations`.
             generations[example['id']]['responses'] = full_responses
@@ -254,8 +267,7 @@ def main(args):
     del model
 
 
-if __name__ == '__main__':
-
+def cli():
     parser = utils.get_parser()
     args, unknown = parser.parse_known_args()
     logging.info('Starting new run with args: %s', args)
@@ -275,3 +287,7 @@ if __name__ == '__main__':
         logging.info('STARTING `compute_uncertainty_measures`!')
         main_compute(args)
         logging.info('FINISHED `compute_uncertainty_measures`!')
+
+
+if __name__ == '__main__':
+    cli()

@@ -17,8 +17,8 @@ from transformers import StoppingCriteriaList
 from huggingface_hub import snapshot_download
 
 
-from uncertainty.models.base_model import BaseModel
-from uncertainty.models.base_model import STOP_SEQUENCES
+from sep.uncertainty.models.base_model import BaseModel
+from sep.uncertainty.models.base_model import STOP_SEQUENCES
 
 
 class StoppingCriteriaSub(StoppingCriteria):
@@ -216,12 +216,39 @@ class HuggingfaceModel(BaseModel):
                 device_map='auto',
                 torch_dtype=torch.bfloat16
             )
+        elif 'qwen' in model_name.lower():
+            # Prefer a locally downloaded snapshot (e.g. /build_bak/models/Qwen3-8B),
+            # falling back to the Hub id Qwen/<model_name>.
+            models_dir = os.getenv('SEP_MODELS_DIR', '/build_bak/models')
+            local_path = os.path.join(models_dir, model_name)
+            model_id = local_path if os.path.isdir(local_path) else f'Qwen/{model_name}'
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_id, device_map='auto', token_type_ids=None,
+                clean_up_tokenization_spaces=False)
+            qwen_kwargs = dict(
+                device_map='auto',
+                torch_dtype=torch.bfloat16,
+            )
+            try:
+                import flash_attn  # noqa: F401
+                qwen_kwargs['attn_implementation'] = 'flash_attention_2'
+                logging.info('Using flash_attention_2 for Qwen.')
+            except ImportError:
+                logging.info('flash_attn not available; falling back to sdpa.')
+                qwen_kwargs['attn_implementation'] = 'sdpa'
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id, **qwen_kwargs)
         else:
             raise ValueError
 
         self.model_name = model_name
         self.stop_sequences = stop_sequences + [self.tokenizer.eos_token]
-        self.token_limit = 4096 if 'Llama-2' in model_name else 2048
+        if 'Llama-2' in model_name:
+            self.token_limit = 4096
+        elif 'qwen' in model_name.lower():
+            self.token_limit = 8192
+        else:
+            self.token_limit = 2048
 
     
     def predict(self, input_data, temperature, return_full=False, return_latent=False):
@@ -232,7 +259,8 @@ class HuggingfaceModel(BaseModel):
 
         inputs = self.tokenizer(input_data, return_tensors="pt").to("cuda")
 
-        if 'llama' in self.model_name.lower() or 'falcon' in self.model_name or 'mistral' in self.model_name.lower():
+        mn_lower = self.model_name.lower()
+        if 'llama' in mn_lower or 'falcon' in mn_lower or 'mistral' in mn_lower or 'qwen' in mn_lower:
             if 'token_type_ids' in inputs:  # HF models seems has changed.
                 del inputs['token_type_ids']
             pad_token_id = self.tokenizer.eos_token_id
@@ -311,6 +339,11 @@ class HuggingfaceModel(BaseModel):
         else:
             hidden = outputs.hidden_states
 
+        # hidden[k][:, -1, :] encodes generated token k-1 (hidden[0] is the
+        # prefill, encoding the last input token), so the last CONTENT token
+        # lives at hidden[n_generated]. When the stop word fused into a content
+        # token or generation hit max_new_tokens, that index is out of range
+        # (len(hidden) == n_new), so clamp to the last available step.
         if len(hidden) == 1:
             logging.warning(
                 'Taking first and only generation for hidden! '
@@ -320,20 +353,10 @@ class HuggingfaceModel(BaseModel):
                 self.tokenizer.decode(outputs['sequences'][0][-1]),
                 full_answer,
                 )
-            last_input = hidden[0]
-        elif ((n_generated - 1) >= len(hidden)):
-            # if access idx is larger/equal
-            logging.error(
-                'Taking last state because n_generated is too large'
-                'n_generated: %d, n_input_token: %d, token_stop_index %d, '
-                'last_token: %s, generation was: %s, slice_answer: %s',
-                n_generated, n_input_token, token_stop_index,
-                self.tokenizer.decode(outputs['sequences'][0][-1]),
-                full_answer, sliced_answer
-                )
-            last_input = hidden[-1]
+            last_idx = 0
         else:
-            last_input = hidden[n_generated - 1]
+            last_idx = min(n_generated, len(hidden) - 1)
+        last_input = hidden[last_idx]
 
         # Then access last layer for input
         last_layer = last_input[-1]
@@ -341,13 +364,10 @@ class HuggingfaceModel(BaseModel):
         last_token_embedding = last_layer[:, -1, :].cpu()
 
         if return_latent:
-            # Stack second last token embeddings from all layers 
-            if len(hidden) == 1:  # FIX: runtime error for mistral-7b on bioasq
-                sec_last_input = hidden[0]
-            elif ((n_generated - 2) >= len(hidden)):
-                sec_last_input = hidden[-2]
-            else:
-                sec_last_input = hidden[n_generated - 2]
+            # Second-last content token: exactly one decode step before last_idx,
+            # floored at the prefill so it never underflows.
+            sec_last_idx = max(last_idx - 1, 0)
+            sec_last_input = hidden[sec_last_idx]
             sec_last_token_embedding = torch.stack([layer[:, -1, :] for layer in sec_last_input]).cpu()
     
             # Get the last input token embeddings (before generated tokens)
@@ -380,6 +400,114 @@ class HuggingfaceModel(BaseModel):
         return_values = (sliced_answer, log_likelihoods, hidden_states)
 
         return return_values
+
+    def _slice_answer(self, full_answer, input_data):
+        """Strip prompt and stop sequences from a decoded generation.
+
+        Returns (sliced_answer, n_generated) where n_generated is the number of
+        generated tokens up to (and excluding) the stop sequence.
+        """
+        if full_answer.startswith(input_data):
+            input_data_offset = len(input_data)
+        else:
+            raise ValueError('Have not tested this in a while.')
+
+        answer = full_answer[input_data_offset:]
+
+        stop_at = len(answer)
+        sliced_answer = answer
+        if self.stop_sequences is not None:
+            for stop in self.stop_sequences:
+                if answer.endswith(stop):
+                    stop_at = len(answer) - len(stop)
+                    sliced_answer = answer[:stop_at]
+                    break
+            if not all([stop not in sliced_answer for stop in self.stop_sequences]):
+                error_msg = 'Error: Stop words not removed successfully!'
+                error_msg += f'Answer: >{answer}< '
+                error_msg += f'Sliced Answer: >{sliced_answer}<'
+                logging.error(error_msg)
+
+        sliced_answer = sliced_answer.strip()
+        token_stop_index = self.tokenizer(
+            full_answer[:input_data_offset + stop_at],
+            return_tensors="pt")['input_ids'].shape[1]
+        return sliced_answer, token_stop_index
+
+    def predict_batch(self, input_data, temperature, num_return_sequences):
+        """Sample `num_return_sequences` generations in a single forward pass.
+
+        Used for the high-temperature samples that only feed the semantic
+        entropy estimate: returns text + token log-likelihoods per sample and
+        deliberately skips hidden states (unused downstream) for speed/memory.
+        """
+        if isinstance(input_data, tuple):
+            logging.WARNING("INPUT IS A TUPLE.")
+            input_data = input_data[0]
+
+        inputs = self.tokenizer(input_data, return_tensors="pt").to("cuda")
+
+        mn_lower = self.model_name.lower()
+        if 'llama' in mn_lower or 'falcon' in mn_lower or 'mistral' in mn_lower or 'qwen' in mn_lower:
+            if 'token_type_ids' in inputs:
+                del inputs['token_type_ids']
+            pad_token_id = self.tokenizer.eos_token_id
+        else:
+            pad_token_id = None
+
+        if self.stop_sequences is not None:
+            stopping_criteria = StoppingCriteriaList([StoppingCriteriaSub(
+                stops=self.stop_sequences,
+                initial_length=len(inputs['input_ids'][0]),
+                tokenizer=self.tokenizer)])
+        else:
+            stopping_criteria = None
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                return_dict_in_generate=True,
+                output_scores=True,
+                output_hidden_states=False,
+                temperature=temperature,
+                do_sample=True,
+                num_return_sequences=num_return_sequences,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=pad_token_id,
+            )
+
+        transition_scores = self.model.compute_transition_scores(
+            outputs.sequences, outputs.scores, normalize_logits=True)
+
+        n_input_token = len(inputs['input_ids'][0])
+        results = []
+        for s in range(num_return_sequences):
+            if len(outputs.sequences[s]) > self.token_limit:
+                raise ValueError(
+                    'Generation exceeding token limit %d > %d' % (
+                        len(outputs.sequences[s]), self.token_limit))
+
+            full_answer = self.tokenizer.decode(
+                outputs.sequences[s], skip_special_tokens=True)
+            sliced_answer, token_stop_index = self._slice_answer(
+                full_answer, input_data)
+            n_generated = token_stop_index - n_input_token
+            if n_generated <= 0:
+                logging.warning(
+                    'Only stop_words were generated. For likelihoods, taking '
+                    'stop word instead.')
+                n_generated = 1
+
+            log_likelihoods = [score.item() for score in transition_scores[s]][:n_generated]
+            if len(log_likelihoods) == self.max_new_tokens:
+                logging.warning('Generation interrupted by max_token limit.')
+            if len(log_likelihoods) == 0:
+                raise ValueError
+
+            results.append((sliced_answer, log_likelihoods))
+
+        return results
 
     def get_p_true(self, input_data):
         """Get the probability of the model anwering A (True) for the given input"""
