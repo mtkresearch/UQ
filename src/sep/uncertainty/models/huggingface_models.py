@@ -119,12 +119,19 @@ class HuggingfaceModel(BaseModel):
             llama65b = '65b' in model_name.lower() and base == 'huggyllama'
             llama2or3_70b = '70b' in model_name.lower() and base == 'meta-llama'
 
-            if ('7b' in model_name or '13b' in model_name) or eightbit:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    f"{base}/{model_name}", device_map="auto",
-                    max_memory={0: '80GIB'}, **kwargs,)
+            # if ('7b' in model_name or '13b' in model_name) or eightbit:
+            #     self.model = AutoModelForCausalLM.from_pretrained(
+            #         f"{base}/{model_name}", device_map="auto",
+            #         max_memory={0: '80GIB'}, **kwargs,)
+            
+            # if ('7b' in model_name or '13b' in model_name) or eightbit:
+            #     self.model = AutoModelForCausalLM.from_pretrained(
+            #         f"{base}/{model_name}", device_map="auto",
+            #         max_memory={0: '45GIB', 1: '45GIB', 2: '45GIB', 3: '45GIB'},
+            #         **kwargs,)
 
-            elif llama2or3_70b or llama65b:
+
+            if llama2or3_70b or llama65b:
                 path = snapshot_download(
                     repo_id=f'{base}/{model_name}',
                     allow_patterns=['*.json', '*.model', '*.safetensors'],
@@ -151,9 +158,20 @@ class HuggingfaceModel(BaseModel):
                 self.model = accelerate.load_checkpoint_and_dispatch(
                     self.model, path, device_map=full_model_device_map,
                     dtype='float16', skip_keys='past_key_values')
-
             else:
-                raise ValueError
+                # standard load — now covers 1B/3B/7B/8B/13B.
+                # Pin to a SINGLE GPU: sharding an 8B across multiple GPUs (the old
+                # device_map="auto" + max_memory config) produced NaN logits ->
+                # garbage generations. A 8B in bf16 (~16GB) fits one A6000 (48GB).
+                # bf16 is Llama-3's native dtype.
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    f"{base}/{model_name}",
+                    # device_map={"": 0},
+                    torch_dtype=torch.bfloat16,
+                    **kwargs,)
+
+            # else:
+            #     raise ValueError
 
         elif 'mistral' in model_name.lower():
 
@@ -171,7 +189,7 @@ class HuggingfaceModel(BaseModel):
             model_id = f'mistralai/{model_name}'
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
+                clean_up_tokenization_spaces=False, use_fast=False)
 
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
@@ -184,7 +202,7 @@ class HuggingfaceModel(BaseModel):
             model_id = f'tiiuae/{model_name}'
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
+                clean_up_tokenization_spaces=False, use_fast=False)
 
             kwargs = {'quantization_config': BitsAndBytesConfig(
                 load_in_8bit=True,)}
@@ -199,7 +217,7 @@ class HuggingfaceModel(BaseModel):
             model_id = f'microsoft/{model_name}'  # e.g. Phi-3-mini-128k-instruct
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
+                clean_up_tokenization_spaces=False, use_fast=False)
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
@@ -209,7 +227,7 @@ class HuggingfaceModel(BaseModel):
             model_id = f'google/{model_name}'  # e.g. gemma-7b-it
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
+                clean_up_tokenization_spaces=False, use_fast=False)
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
@@ -276,7 +294,23 @@ class HuggingfaceModel(BaseModel):
         if full_answer.startswith(input_data):
             input_data_offset = len(input_data)
         else:
-            raise ValueError('Have not tested this in a while.')
+            # Newer tokenizers (e.g. Llama-3) may not re-decode the prompt
+            # byte-for-byte identical to `input_data` (leading whitespace /
+            # special-token handling), so `startswith` fails. Recover the
+            # prompt-length offset by decoding the input portion of the actual
+            # output sequence the same way `full_answer` was decoded -- this is
+            # guaranteed consistent with `full_answer`.
+            n_input_token = len(inputs['input_ids'][0])
+            decoded_input = self.tokenizer.decode(
+                outputs.sequences[0][:n_input_token], skip_special_tokens=True)
+            if full_answer.startswith(decoded_input):
+                input_data_offset = len(decoded_input)
+            else:
+                raise ValueError(
+                    'Could not strip prompt from generation.\n'
+                    f'input_data: >{input_data}<\n'
+                    f'decoded_input: >{decoded_input}<\n'
+                    f'full_answer: >{full_answer}<')
 
         # Remove input from answer.
         answer = full_answer[input_data_offset:]
@@ -347,7 +381,7 @@ class HuggingfaceModel(BaseModel):
             elif ((n_generated - 2) >= len(hidden)):
                 sec_last_input = hidden[-2]
             else:
-                sec_last_input = hidden[n_generated - 2]
+                sec_last_input = hidden[n_generated - 2] 
             sec_last_token_embedding = torch.stack([layer[:, -1, :] for layer in sec_last_input]).cpu()
     
             # Get the last input token embeddings (before generated tokens)
