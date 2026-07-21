@@ -8,8 +8,8 @@ import wandb
 
 from evaluate import load
 
-from uncertainty.models.huggingface_models import HuggingfaceModel
-from uncertainty.utils import openai as oai
+from sep.uncertainty.models.huggingface_models import HuggingfaceModel
+from sep.uncertainty.utils import openai as oai
 
 BRIEF_PROMPTS = {
     'default': "Answer the following question as briefly as possible.\n",
@@ -106,6 +106,13 @@ def get_parser(stages=['generate', 'compute']):
             "--answerable_only", default=False,
             action=argparse.BooleanOptionalAction,
             help='Exclude unanswerable questions.')
+        parser.add_argument(
+            "--num_shards", type=int, default=1,
+            help="Split the sampled indices into this many disjoint shards for "
+                 "data-parallel generation across GPUs.")
+        parser.add_argument(
+            "--shard_index", type=int, default=0,
+            help="Which shard (0-based) this process should generate.")
 
     if 'compute' in stages:
         parser.add_argument('--recompute_accuracy',
@@ -274,7 +281,8 @@ def get_reference(example):
 
 def init_model(args):
     mn = args.model_name
-    if 'llama' in mn.lower() or 'falcon' in mn.lower() or 'mistral' in mn.lower() or 'phi' in mn.lower():
+    mn_l = mn.lower()
+    if any(k in mn_l for k in ('llama', 'falcon', 'mistral', 'phi', 'gemma', 'qwen', 'olmoe')):
         model = HuggingfaceModel(
             mn, stop_sequences='default',
             max_new_tokens=args.model_max_new_tokens)
