@@ -8,21 +8,21 @@ import random
 import numpy as np
 import wandb
 
-from analyze_results import analyze_run
-from uncertainty.data.data_utils import load_ds
-from uncertainty.uncertainty_measures.p_ik import get_p_ik
-from uncertainty.uncertainty_measures.semantic_entropy import get_semantic_ids
-from uncertainty.uncertainty_measures.semantic_entropy import logsumexp_by_id
-from uncertainty.uncertainty_measures.semantic_entropy import predictive_entropy
-from uncertainty.uncertainty_measures.semantic_entropy import predictive_entropy_rao
-from uncertainty.uncertainty_measures.semantic_entropy import cluster_assignment_entropy
-from uncertainty.uncertainty_measures.semantic_entropy import context_entails_response
-from uncertainty.uncertainty_measures.semantic_entropy import EntailmentDeberta
-from uncertainty.uncertainty_measures.semantic_entropy import EntailmentGPT4
-from uncertainty.uncertainty_measures.semantic_entropy import EntailmentGPT35
-from uncertainty.uncertainty_measures.semantic_entropy import EntailmentLlama
-from uncertainty.uncertainty_measures import p_true as p_true_utils
-from uncertainty.utils import utils
+from sep.analyze_results import analyze_run
+from sep.uncertainty.data.data_utils import load_ds
+from sep.uncertainty.uncertainty_measures.p_ik import get_p_ik
+from sep.uncertainty.uncertainty_measures.semantic_entropy import get_semantic_ids
+from sep.uncertainty.uncertainty_measures.semantic_entropy import logsumexp_by_id
+from sep.uncertainty.uncertainty_measures.semantic_entropy import predictive_entropy
+from sep.uncertainty.uncertainty_measures.semantic_entropy import predictive_entropy_rao
+from sep.uncertainty.uncertainty_measures.semantic_entropy import cluster_assignment_entropy
+from sep.uncertainty.uncertainty_measures.semantic_entropy import context_entails_response
+from sep.uncertainty.uncertainty_measures.semantic_entropy import EntailmentDeberta
+from sep.uncertainty.uncertainty_measures.semantic_entropy import EntailmentGPT4
+from sep.uncertainty.uncertainty_measures.semantic_entropy import EntailmentGPT35
+from sep.uncertainty.uncertainty_measures.semantic_entropy import EntailmentLlama
+from sep.uncertainty.uncertainty_measures import p_true as p_true_utils
+from sep.uncertainty.utils import utils
 
 
 utils.setup_logger()

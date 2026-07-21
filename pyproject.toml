@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sep"
+version = "0.1.0"
+description = "Semantic Entropy Probes: generation, uncertainty measures, and probe training"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.1",
+    "transformers>=5.14,<6",
+    "accelerate>=0.30",
+    "datasets>=2.18",
+    "evaluate>=0.4",
+    "huggingface_hub>=0.23",
+    "sentencepiece",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
+    "tqdm",
+    "tenacity",
+    "bitsandbytes; platform_system == 'Linux'",
+    "wandb>=0.16",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["ipython", "jupyter"]
+
+[project.scripts]
+sep-generate = "sep.generate_answers:cli"
+sep-train-probes = "sep.train_probes:cli"
+sep-merge-shards = "sep.merge_shards:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sep = ["**/*.json"]
