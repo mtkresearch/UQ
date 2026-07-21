@@ -119,12 +119,7 @@ class HuggingfaceModel(BaseModel):
             llama65b = '65b' in model_name.lower() and base == 'huggyllama'
             llama2or3_70b = '70b' in model_name.lower() and base == 'meta-llama'
 
-            if ('7b' in model_name or '13b' in model_name) or eightbit:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    f"{base}/{model_name}", device_map="auto",
-                    max_memory={0: '80GIB'}, **kwargs,)
-
-            elif llama2or3_70b or llama65b:
+            if llama2or3_70b or llama65b:
                 path = snapshot_download(
                     repo_id=f'{base}/{model_name}',
                     allow_patterns=['*.json', '*.model', '*.safetensors'],
@@ -151,9 +146,17 @@ class HuggingfaceModel(BaseModel):
                 self.model = accelerate.load_checkpoint_and_dispatch(
                     self.model, path, device_map=full_model_device_map,
                     dtype='float16', skip_keys='past_key_values')
-
             else:
-                raise ValueError
+                # standard load — now covers 1B/3B/7B/8B/13B.
+                # Pin to a SINGLE GPU: sharding an 8B across multiple GPUs (the old
+                # device_map="auto" + max_memory config) produced NaN logits ->
+                # garbage generations. An 8B in bf16 (~16GB) fits one 24GB card.
+                # bf16 is Llama-3's native dtype.
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    f"{base}/{model_name}",
+                    device_map={"": 0},
+                    torch_dtype=torch.bfloat16,
+                    **kwargs,)
 
         elif 'mistral' in model_name.lower():
 
@@ -304,7 +307,23 @@ class HuggingfaceModel(BaseModel):
         if full_answer.startswith(input_data):
             input_data_offset = len(input_data)
         else:
-            raise ValueError('Have not tested this in a while.')
+            # Newer tokenizers (e.g. Llama-3) may not re-decode the prompt
+            # byte-for-byte identical to `input_data` (leading whitespace /
+            # special-token handling), so `startswith` fails. Recover the
+            # prompt-length offset by decoding the input portion of the actual
+            # output sequence the same way `full_answer` was decoded -- this is
+            # guaranteed consistent with `full_answer`.
+            n_input_token = len(inputs['input_ids'][0])
+            decoded_input = self.tokenizer.decode(
+                outputs.sequences[0][:n_input_token], skip_special_tokens=True)
+            if full_answer.startswith(decoded_input):
+                input_data_offset = len(decoded_input)
+            else:
+                raise ValueError(
+                    'Could not strip prompt from generation.\n'
+                    f'input_data: >{input_data}<\n'
+                    f'decoded_input: >{decoded_input}<\n'
+                    f'full_answer: >{full_answer}<')
 
         # Remove input from answer.
         answer = full_answer[input_data_offset:]
@@ -401,16 +420,27 @@ class HuggingfaceModel(BaseModel):
 
         return return_values
 
-    def _slice_answer(self, full_answer, input_data):
+    def _slice_answer(self, full_answer, input_data, decoded_input=None):
         """Strip prompt and stop sequences from a decoded generation.
 
         Returns (sliced_answer, n_generated) where n_generated is the number of
         generated tokens up to (and excluding) the stop sequence.
+
+        `decoded_input`, if given, is the prompt re-decoded from the output
+        sequence's own input tokens; used as a fallback when a newer tokenizer
+        (e.g. Llama-3) does not reproduce `input_data` byte-for-byte and the
+        exact-prefix check fails. Mirrors the fallback in `predict`.
         """
         if full_answer.startswith(input_data):
             input_data_offset = len(input_data)
+        elif decoded_input is not None and full_answer.startswith(decoded_input):
+            input_data_offset = len(decoded_input)
         else:
-            raise ValueError('Have not tested this in a while.')
+            raise ValueError(
+                'Could not strip prompt from generation.\n'
+                f'input_data: >{input_data}<\n'
+                f'decoded_input: >{decoded_input}<\n'
+                f'full_answer: >{full_answer}<')
 
         answer = full_answer[input_data_offset:]
 
@@ -490,8 +520,12 @@ class HuggingfaceModel(BaseModel):
 
             full_answer = self.tokenizer.decode(
                 outputs.sequences[s], skip_special_tokens=True)
+            # Re-decode the prompt tokens the same way as `full_answer`, as a
+            # fallback for tokenizers that don't reproduce `input_data` exactly.
+            decoded_input = self.tokenizer.decode(
+                outputs.sequences[s][:n_input_token], skip_special_tokens=True)
             sliced_answer, token_stop_index = self._slice_answer(
-                full_answer, input_data)
+                full_answer, input_data, decoded_input=decoded_input)
             n_generated = token_stop_index - n_input_token
             if n_generated <= 0:
                 logging.warning(
