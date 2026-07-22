@@ -36,6 +36,7 @@ bars because the anti-correlated low-target/high-other cell is small per dataset
 (SE_s and SE_t are positively correlated); the extreme 2x2 is illustrative only.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -466,7 +467,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n-boot", type=int, default=2000)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.gen_1p7b) == len(args.gen_8b) == len(args.names)
 
     datasets, per_ds, all_grids = [], {}, {}

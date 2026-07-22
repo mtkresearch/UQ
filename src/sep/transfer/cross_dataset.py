@@ -20,6 +20,7 @@ Reported as a matrix of eval AUROC (rows = fit dataset A, cols = eval dataset B)
   * native    -> per-eval-dataset probe trained on B's own labels (upper reference).
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 
@@ -167,7 +168,7 @@ def main():
     p.add_argument("--out-dir", required=True)
     p.add_argument("--n-align", type=int, default=1500)
     p.add_argument("--seed", type=int, default=0)
-    args = p.parse_args()
+    args = apply_yaml_config(p)
     gens = list(zip(args.source_gens, args.target_gens))
     run(gens, args.names, args.token, args.out_dir, args.n_align, args.seed)
 

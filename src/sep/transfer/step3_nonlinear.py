@@ -12,6 +12,7 @@ Curves, all vs number of target examples:
   C  shallow MLP map + source probe (unlabeled)
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 
@@ -160,7 +161,7 @@ def main():
                    default=[50, 100, 200, 400, 800, 1500])
     p.add_argument("--hidden", type=int, default=512)
     p.add_argument("--seed", type=int, default=0)
-    args = p.parse_args()
+    args = apply_yaml_config(p)
     run(args.source_gen, args.target_gen, args.token, args.out_dir,
         args.n_eval, args.n_grid, args.hidden, args.seed)
 

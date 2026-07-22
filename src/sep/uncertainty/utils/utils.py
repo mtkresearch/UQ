@@ -1,5 +1,6 @@
 """Utility functions."""
 import os
+import sys
 import logging
 import argparse
 import pickle
@@ -10,147 +11,163 @@ from evaluate import load
 
 from sep.uncertainty.models.huggingface_models import HuggingfaceModel
 from sep.uncertainty.utils import openai as oai
+from sep.uncertainty.utils.config import (
+    add_config_arg, load_config, sniff_config_paths)
 
 BRIEF_PROMPTS = {
     'default': "Answer the following question as briefly as possible.\n",
     'chat': 'Answer the following question in a single brief but complete sentence.\n'}
 
 
-def get_parser(stages=['generate', 'compute']):
+def get_parser(stages=['generate', 'compute'], config_paths=None):
     entity = os.getenv('WANDB_SEM_UNC_ENTITY', None)
 
+    # YAML supplies argparse defaults; the CLI still overrides per flag.
+    if config_paths is None:
+        config_paths = sniff_config_paths(sys.argv[1:])
+    cfg = load_config(config_paths)
+
+    def d(key, fallback):
+        return cfg[key] if key in cfg else fallback
+
     parser = argparse.ArgumentParser()
+    add_config_arg(parser)
     parser.add_argument(
-        "--debug", action=argparse.BooleanOptionalAction, default=False,
+        "--debug", action=argparse.BooleanOptionalAction, default=d('debug', False),
         help="Keep default wandb clean.")
-    parser.add_argument('--entity', type=str, default=entity)
-    parser.add_argument('--random_seed', type=int, default=10)
+    parser.add_argument('--entity', type=str, default=d('entity', None) or entity)
+    parser.add_argument('--random_seed', type=int, default=d('random_seed', 10))
     parser.add_argument(
-        "--metric", type=str, default="squad",
+        "--metric", type=str, default=d('metric', "squad"),
         choices=['squad', 'llm', 'llm_gpt-3.5', 'llm_gpt-4'],
         help="Metric to assign accuracy to generations.")
     parser.add_argument(
         "--compute_accuracy_at_all_temps",
-        action=argparse.BooleanOptionalAction, default=True,
+        action=argparse.BooleanOptionalAction, default=d('compute_accuracy_at_all_temps', True),
         help="Compute accuracy at all temperatures or only t<<1.")
     parser.add_argument(
-        "--experiment_lot", type=str, default='Unnamed Experiment',
+        "--experiment_lot", type=str, default=d('experiment_lot', 'Unnamed Experiment'),
         help="Keep default wandb clean.")
+    parser.add_argument(
+        "--out_dir", type=str, default=d('out_dir', './sep_scratch'),
+        help="Base output dir for wandb runs (<out_dir>/<user>/uncertainty). "
+             "SCRATCH_DIR env overrides this when set.")
     if 'generate' in stages:
         parser.add_argument(
-            "--model_name", type=str, default="Llama-2-7b-chat", help="Model name",
+            "--model_name", type=str, default=d('model_name', "Llama-2-7b-chat"), help="Model name",
         )
         parser.add_argument(
-            "--model_max_new_tokens", type=int, default=50,
+            "--model_max_new_tokens", type=int, default=d('model_max_new_tokens', 50),
             help="Max number of tokens generated.",
         )
         parser.add_argument(
-            "--dataset", type=str, default="trivia_qa",
+            "--dataset", type=str, default=d('dataset', "trivia_qa"),
             choices=['trivia_qa', 'squad', 'bioasq', 'nq', 'svamp'],
             help="Dataset to use")
         parser.add_argument(
-            "--ood_train_dataset", type=str, default=None,
+            "--ood_train_dataset", type=str, default=d('ood_train_dataset', None),
             choices=['trivia_qa', 'squad', 'bioasq', 'nq', 'svamp'],
             help="Dataset to use to assemble few-shot prompt, p_true prompt, and train p_ik.")
         parser.add_argument(
-            "--num_samples", type=int, default=400,
+            "--num_samples", type=int, default=d('num_samples', 400),
             help="Number of samples to use")
         parser.add_argument(
-            "--num_few_shot", type=int, default=5,
+            "--num_few_shot", type=int, default=d('num_few_shot', 5),
             help="Number of few shot examples to use")
         parser.add_argument(
-            "--p_true_num_fewshot", type=int, default=20,
+            "--p_true_num_fewshot", type=int, default=d('p_true_num_fewshot', 20),
             help="Number of few shot examples to use")
         parser.add_argument(
-            "--p_true_hint", default=False,
+            "--p_true_hint", default=d('p_true_hint', False),
             action=argparse.BooleanOptionalAction,
             help="Get generations for training set?")
         parser.add_argument(
-            "--num_generations", type=int, default=10,
+            "--num_generations", type=int, default=d('num_generations', 10),
             help="Number of generations to use")
         parser.add_argument(
-            "--temperature", type=float, default=1.0,
+            "--temperature", type=float, default=d('temperature', 1.0),
             help="Temperature")
         parser.add_argument(
-            "--use_mc_options", type=bool, default=True,
+            "--use_mc_options", type=bool, default=d('use_mc_options', True),
             help="Include MC options question?")
         parser.add_argument(
-            "--get_training_set_generations", default=True,
+            "--get_training_set_generations", default=d('get_training_set_generations', True),
             action=argparse.BooleanOptionalAction,
             help="Get generations for training set?")
         parser.add_argument(
-            "--use_context", default=False,
+            "--use_context", default=d('use_context', False),
             action=argparse.BooleanOptionalAction,
             help="Get generations for training set?")
         parser.add_argument(
-            "--get_training_set_generations_most_likely_only", default=True,
+            "--get_training_set_generations_most_likely_only",
+            default=d('get_training_set_generations_most_likely_only', True),
             action=argparse.BooleanOptionalAction,
             help=(
                 "Only get embedding of most likely answer for training set. "
                 "This is all that's needed for p_true."))
-        parser.add_argument('--compute_p_true', default=True,
+        parser.add_argument('--compute_p_true', default=d('compute_p_true', True),
                             action=argparse.BooleanOptionalAction)
         parser.add_argument(
-            "--brief_always", default=False, action=argparse.BooleanOptionalAction)
+            "--brief_always", default=d('brief_always', False), action=argparse.BooleanOptionalAction)
         parser.add_argument(
-            "--enable_brief", default=True, action=argparse.BooleanOptionalAction)
+            "--enable_brief", default=d('enable_brief', True), action=argparse.BooleanOptionalAction)
         parser.add_argument(
-            "--brief_prompt", default='default', type=str)
+            "--brief_prompt", default=d('brief_prompt', 'default'), type=str)
         parser.add_argument(
-            "--prompt_type", default='default', type=str)
+            "--prompt_type", default=d('prompt_type', 'default'), type=str)
         parser.add_argument(
-            "--compute_uncertainties", default=True,
+            "--compute_uncertainties", default=d('compute_uncertainties', True),
             action=argparse.BooleanOptionalAction,
             help='Trigger compute_uncertainty_measures.py')
         parser.add_argument(
-            "--answerable_only", default=False,
+            "--answerable_only", default=d('answerable_only', False),
             action=argparse.BooleanOptionalAction,
             help='Exclude unanswerable questions.')
         parser.add_argument(
-            "--num_shards", type=int, default=1,
+            "--num_shards", type=int, default=d('num_shards', 1),
             help="Split the sampled indices into this many disjoint shards for "
                  "data-parallel generation across GPUs.")
         parser.add_argument(
-            "--shard_index", type=int, default=0,
+            "--shard_index", type=int, default=d('shard_index', 0),
             help="Which shard (0-based) this process should generate.")
 
     if 'compute' in stages:
         parser.add_argument('--recompute_accuracy',
-                            default=False, action=argparse.BooleanOptionalAction)
-        parser.add_argument('--eval_wandb_runid', type=str,
+                            default=d('recompute_accuracy', False), action=argparse.BooleanOptionalAction)
+        parser.add_argument('--eval_wandb_runid', type=str, default=d('eval_wandb_runid', None),
                             help='wandb run id of the dataset to evaluate on')
-        parser.add_argument('--train_wandb_runid', type=str, default=None,
+        parser.add_argument('--train_wandb_runid', type=str, default=d('train_wandb_runid', None),
                             help='wandb run id of the dataset from which training embeddings and p_true samples will be taken')
-        parser.add_argument('--num_eval_samples', type=int, default=int(1e19))
+        parser.add_argument('--num_eval_samples', type=int, default=d('num_eval_samples', int(1e19)))
         parser.add_argument('--compute_predictive_entropy',
-                            default=True, action=argparse.BooleanOptionalAction)
-        parser.add_argument('--compute_p_ik', default=True,
+                            default=d('compute_predictive_entropy', True), action=argparse.BooleanOptionalAction)
+        parser.add_argument('--compute_p_ik', default=d('compute_p_ik', True),
                             action=argparse.BooleanOptionalAction)
-        parser.add_argument('--compute_p_ik_answerable', default=False,
+        parser.add_argument('--compute_p_ik_answerable', default=d('compute_p_ik_answerable', False),
                             action=argparse.BooleanOptionalAction)
-        parser.add_argument('--compute_context_entails_response', default=False,
+        parser.add_argument('--compute_context_entails_response', default=d('compute_context_entails_response', False),
                             action=argparse.BooleanOptionalAction)
-        parser.add_argument('--analyze_run', default=True,
+        parser.add_argument('--analyze_run', default=d('analyze_run', True),
                             action=argparse.BooleanOptionalAction)
-        parser.add_argument('--assign_new_wandb_id', default=True,
+        parser.add_argument('--assign_new_wandb_id', default=d('assign_new_wandb_id', True),
                             action=argparse.BooleanOptionalAction)
-        parser.add_argument('--restore_entity_eval', type=str, default=entity)
-        parser.add_argument('--restore_entity_train', type=str, default=entity)
+        parser.add_argument('--restore_entity_eval', type=str, default=d('restore_entity_eval', None) or entity)
+        parser.add_argument('--restore_entity_train', type=str, default=d('restore_entity_train', None) or entity)
         parser.add_argument('--condition_on_question',
-                            default=True, action=argparse.BooleanOptionalAction)
+                            default=d('condition_on_question', True), action=argparse.BooleanOptionalAction)
         parser.add_argument('--strict_entailment',
-                            default=True, action=argparse.BooleanOptionalAction)
-        parser.add_argument('--use_all_generations', default=True, action=argparse.BooleanOptionalAction)
-        parser.add_argument('--use_num_generations', type=int, default=-1)
-        parser.add_argument("--entailment_model", default='deberta', type=str)
+                            default=d('strict_entailment', True), action=argparse.BooleanOptionalAction)
+        parser.add_argument('--use_all_generations', default=d('use_all_generations', True), action=argparse.BooleanOptionalAction)
+        parser.add_argument('--use_num_generations', type=int, default=d('use_num_generations', -1))
+        parser.add_argument("--entailment_model", default=d('entailment_model', 'deberta'), type=str)
         parser.add_argument(
-            "--entailment_cache_id", default=None, type=str,
+            "--entailment_cache_id", default=d('entailment_cache_id', None), type=str,
             help='Restore entailment predictions from previous run for GPT-4/LLaMa-Entailment.')
-        parser.add_argument('--entailment_cache_only', default=False, action=argparse.BooleanOptionalAction)
+        parser.add_argument('--entailment_cache_only', default=d('entailment_cache_only', False), action=argparse.BooleanOptionalAction)
         parser.add_argument('--compute_p_true_in_compute_stage',
-                            default=False, action=argparse.BooleanOptionalAction)
+                            default=d('compute_p_true_in_compute_stage', False), action=argparse.BooleanOptionalAction)
         parser.add_argument('--reuse_entailment_model',
-                            default=False, action=argparse.BooleanOptionalAction,
+                            default=d('reuse_entailment_model', False), action=argparse.BooleanOptionalAction,
                             help='Use entailment model as p_true model.')
     return parser
 

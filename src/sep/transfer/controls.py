@@ -25,6 +25,7 @@ on supervised layer picking --
 Also reports ridge map conditioning kappa(W) (proposal 4.5).
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 
@@ -255,7 +256,7 @@ def main():
     p.add_argument("--layer-variant", default="supervised",
                    choices=["supervised", "reldepth", "cka"])
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
-    args = p.parse_args()
+    args = apply_yaml_config(p)
     run(args.source_gen, args.target_gen, args.token, args.out_dir,
         args.n_grid, args.n_eval, args.layer_variant, args.seeds)
 

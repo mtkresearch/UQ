@@ -1,0 +1,9 @@
+# Full generation preset: `sep-generate --config mistral-nemo` is self-contained.
+model_name: Mistral-Nemo-Base-2407
+model_max_new_tokens: 50
+
+dataset: trivia_qa
+num_samples: 2000
+num_generations: 10
+random_seed: 20
+experiment_lot: mistral_nemo_trivia_qa_2000

@@ -35,7 +35,7 @@ def main(args):
         args.train_wandb_runid = args.eval_wandb_runid
 
     user = os.environ['USER']
-    scratch_dir = os.getenv('SCRATCH_DIR', '.')
+    scratch_dir = os.getenv('SCRATCH_DIR') or args.out_dir
     wandb_dir = f'{scratch_dir}/{user}/uncertainty'
     slurm_jobid = os.getenv('SLURM_JOB_ID', None)
     project = "semantic_uncertainty" if not args.debug else "semantic_uncertainty_debug"

@@ -37,7 +37,7 @@ def main(args):
     user = os.environ['USER']
     entity = os.environ['WANDB_ENT']
     slurm_jobid = os.getenv('SLURM_JOB_ID', None)
-    scratch_dir = os.getenv('SCRATCH_DIR', '.')
+    scratch_dir = os.getenv('SCRATCH_DIR') or args.out_dir
     if not os.path.exists(f"{scratch_dir}/{user}/uncertainty"):
         os.makedirs(f"{scratch_dir}/{user}/uncertainty")
 

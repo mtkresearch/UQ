@@ -104,7 +104,7 @@ def cli():
     logging.info('Found %d shard dirs: %s', len(shard_dirs), shard_dirs)
 
     user = os.environ['USER']
-    scratch_dir = os.getenv('SCRATCH_DIR', '.')
+    scratch_dir = os.getenv('SCRATCH_DIR') or args.out_dir
     wandb.init(
         entity=args.entity,
         project='semantic_uncertainty' if not args.debug else 'semantic_uncertainty_debug',

@@ -24,6 +24,7 @@ The strict paper phi_first (top-K entropy) is left as a regen-required follow-up
 u_first is its cache-available, strictly-cheaper cousin (top-1 vs top-100).
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -160,7 +161,7 @@ def main():
     ap.add_argument("--token", default="slt", choices=["slt", "tbg"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.gens) == len(args.names)
 
     results = {}

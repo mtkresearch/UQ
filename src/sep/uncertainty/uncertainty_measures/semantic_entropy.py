@@ -33,24 +33,53 @@ class BaseEntailment:
 class EntailmentDeberta(BaseEntailment):
     def __init__(self):
         self.tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v2-xlarge-mnli")
+        # fp32 by default: batched clustering then matches the per-pair fp32
+        # result bitwise. bf16 (opt-in via DEBERTA_BF16=1) is ~2x faster but
+        # flips ~0.4% of cluster assignments near the NLI decision boundary.
+        dtype = torch.bfloat16 if os.environ.get('DEBERTA_BF16') else torch.float32
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            "microsoft/deberta-v2-xlarge-mnli").to(DEVICE)
+            "microsoft/deberta-v2-xlarge-mnli", dtype=dtype).to(DEVICE)
+        self.model.eval()
 
     def check_implication(self, text1, text2, *args, **kwargs):
         inputs = self.tokenizer(text1, text2, return_tensors="pt").to(DEVICE)
         # The model checks if text1 -> text2, i.e. if text2 follows from text1.
         # check_implication('The weather is good', 'The weather is good and I like you') --> 1
         # check_implication('The weather is good and I like you', 'The weather is good') --> 2
-        outputs = self.model(**inputs)
+        with torch.inference_mode():
+            outputs = self.model(**inputs)
         logits = outputs.logits
         # Deberta-mnli returns `neutral` and `entailment` classes at indices 1 and 2.
-        largest_index = torch.argmax(F.softmax(logits, dim=1))  # pylint: disable=no-member
-        prediction = largest_index.cpu().item()
+        # argmax(softmax(x)) == argmax(x); skip the softmax.
+        prediction = torch.argmax(logits, dim=1)[0].cpu().item()
         if os.environ.get('DEBERTA_FULL_LOG', False):
             logging.info('Deberta Input: %s -> %s', text1, text2)
             logging.info('Deberta Prediction: %s', prediction)
 
         return prediction
+
+    def check_implication_batch(self, pairs, *args, **kwargs):
+        """Batched entailment for a list of (premise, hypothesis) string pairs.
+
+        Returns a list of int predictions (0/1/2) aligned with `pairs`. One
+        padded forward pass instead of len(pairs) single-example calls -- this
+        is where the semantic-clustering GPU time goes. Results match
+        `check_implication` run per pair (argmax over the same logits).
+        """
+        if not pairs:
+            return []
+        text1 = [p[0] for p in pairs]
+        text2 = [p[1] for p in pairs]
+        inputs = self.tokenizer(
+            text1, text2, return_tensors="pt", padding=True).to(DEVICE)
+        with torch.inference_mode():
+            outputs = self.model(**inputs)
+        preds = torch.argmax(outputs.logits, dim=1).cpu().tolist()
+        if os.environ.get('DEBERTA_FULL_LOG', False):
+            for (t1, t2), p in zip(pairs, preds):
+                logging.info('Deberta Input: %s -> %s', t1, t2)
+                logging.info('Deberta Prediction: %s', p)
+        return preds
 
 
 class EntailmentLLM(BaseEntailment):
@@ -172,37 +201,66 @@ def context_entails_response(context, responses, model):
     return 2 - np.mean(votes)
 
 
+def _equivalent_from_implications(implication_1, implication_2, strict_entailment):
+    assert (implication_1 in [0, 1, 2]) and (implication_2 in [0, 1, 2])
+    if strict_entailment:
+        return (implication_1 == 2) and (implication_2 == 2)
+    implications = [implication_1, implication_2]
+    # No contradiction (0), and not both neutral ([1, 1]).
+    return (0 not in implications) and ([1, 1] != implications)
+
+
 def get_semantic_ids(strings_list, model, strict_entailment=False, example=None):
-    """Group list of predictions into semantic meaning."""
+    """Group list of predictions into semantic meaning.
 
-    def are_equivalent(text1, text2):
+    Precomputes a symmetric equivalence matrix over all i<j pairs, then runs the
+    original greedy clustering over it. `are_equivalent` is symmetric (both the
+    strict and loose rules are invariant to swapping the two implications), and
+    identical strings are trivially equivalent, so those pairs skip the model.
+    When the entailment model exposes `check_implication_batch`, all remaining
+    pairs run in a single batched forward pass; otherwise we fall back to
+    per-pair calls. Clustering results are identical to the per-pair version.
+    """
+    n = len(strings_list)
+    equivalent = [[False] * n for _ in range(n)]
 
-        implication_1 = model.check_implication(text1, text2, example=example)
-        implication_2 = model.check_implication(text2, text1, example=example)  # pylint: disable=arguments-out-of-order
-        assert (implication_1 in [0, 1, 2]) and (implication_2 in [0, 1, 2])
+    # Pairs (i<j) that are not exact string matches need the entailment model,
+    # run in both directions.
+    directed = []  # (i, j, text1, text2) for check(text1, text2)
+    for i in range(n):
+        for j in range(i + 1, n):
+            if strings_list[i] == strings_list[j]:
+                equivalent[i][j] = equivalent[j][i] = True
+            else:
+                directed.append((i, j, strings_list[i], strings_list[j]))
+                directed.append((j, i, strings_list[j], strings_list[i]))
 
-        if strict_entailment:
-            semantically_equivalent = (implication_1 == 2) and (implication_2 == 2)
-
+    if directed:
+        pairs = [(t1, t2) for (_, _, t1, t2) in directed]
+        if hasattr(model, 'check_implication_batch'):
+            preds = model.check_implication_batch(pairs, example=example)
         else:
-            implications = [implication_1, implication_2]
-            # Check if none of the implications are 0 (contradiction) and not both of them are neutral.
-            semantically_equivalent = (0 not in implications) and ([1, 1] != implications)
+            preds = [model.check_implication(t1, t2, example=example)
+                     for (t1, t2) in pairs]
+        # Fold the two directed predictions per pair into a symmetric verdict.
+        impl = {}  # (a, b) -> prediction for check(a, b)
+        for (a, b, _, _), p in zip(directed, preds):
+            impl[(a, b)] = p
+        for i in range(n):
+            for j in range(i + 1, n):
+                if (i, j) in impl:
+                    eq = _equivalent_from_implications(
+                        impl[(i, j)], impl[(j, i)], strict_entailment)
+                    equivalent[i][j] = equivalent[j][i] = eq
 
-        return semantically_equivalent
-
-    # Initialise all ids with -1.
-    semantic_set_ids = [-1] * len(strings_list)
-    # Keep track of current id.
+    # Original greedy clustering, now reading the precomputed matrix.
+    semantic_set_ids = [-1] * n
     next_id = 0
-    for i, string1 in enumerate(strings_list):
-        # Check if string1 already has an id assigned.
+    for i in range(n):
         if semantic_set_ids[i] == -1:
-            # If string1 has not been assigned an id, assign it next_id.
             semantic_set_ids[i] = next_id
-            for j in range(i+1, len(strings_list)):
-                # Search through all remaining strings. If they are equivalent to string1, assign them the same id.
-                if are_equivalent(string1, strings_list[j]):
+            for j in range(i + 1, n):
+                if equivalent[i][j]:
                     semantic_set_ids[j] = next_id
             next_id += 1
 

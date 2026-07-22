@@ -15,6 +15,7 @@ transfer story is a property of the label choice it will break; if it's a proper
 of the shared uncertainty geometry it will survive.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -90,7 +91,7 @@ def main():
     ap.add_argument("--n-grid", type=int, nargs="+",
                     default=[50, 100, 200, 400, 800, 1500])
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
 
     all_res = {}
     for nm, sg, tg in zip(args.names, args.sources, args.targets):

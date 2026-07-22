@@ -25,6 +25,7 @@ Cross-reference: is our transfer strongest on the TriviaQA-NQ pair (their aligne
 0.73 pair)? We print the cross_dataset transfer AUROCs alongside the cosines.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -155,7 +156,7 @@ def main():
     ap.add_argument("--cross_dataset_json", default=None,
                     help="optional cross_dataset_slt.json for transfer cross-ref")
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.gens) == len(args.names)
 
     Hs, y_se, y_err = [], [], []

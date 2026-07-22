@@ -22,6 +22,7 @@ We measure, per dataset, mean +- std over seeds:
 Uses the tuned alpha=1e4 map and the same prep() pipeline as the conditioning study.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 
@@ -171,7 +172,7 @@ def main():
     ap.add_argument("--k-grid", type=int, nargs="+",
                     default=[0, 10, 20, 50, 100, 200, 500])
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.sources) == len(args.targets) == len(args.names)
 
     all_res = {}

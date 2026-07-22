@@ -15,6 +15,7 @@ We report the lexical AUROC next to the hidden-state probe AUROC (from A1/A2) so
 gap is explicit: probe >> lexical means the signal is model-internal.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -87,7 +88,7 @@ def main():
     ap.add_argument("--names", nargs="+", required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.gens) == len(args.names)
 
     results = {}

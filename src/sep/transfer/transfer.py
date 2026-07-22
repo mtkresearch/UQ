@@ -21,6 +21,7 @@ The transfer hypothesis holds if Curve B reaches useful AUROC with far fewer
 labeled target examples than Curve A needs.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -261,7 +262,7 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--alpha", type=float, default=1e3,
                    help="ridge-map regularization (conditioning study: 1e4 is optimal)")
-    args = p.parse_args()
+    args = apply_yaml_config(p)
     run(args.source_gen, args.target_gen, args.token, args.out_dir,
         args.n_eval, args.n_grid, args.seed, alpha=args.alpha)
 

@@ -25,6 +25,7 @@ projection, so 1e17 ~ 1/eps(float64) means the bottom of the spectrum is at the
 numerical noise floor and carries no signal -- these checks quantify that.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -269,7 +270,7 @@ def main():
                     help="alignment size per seed for stability resampling (< pool)")
     ap.add_argument("--n-seeds", type=int, default=8)
     ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = apply_yaml_config(ap)
     assert len(args.sources) == len(args.targets) == len(args.names)
 
     all_res, plotdata = {}, {}

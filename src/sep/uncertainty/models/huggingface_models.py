@@ -11,6 +11,7 @@ from accelerate import Accelerator
 from transformers import AutoTokenizer
 from transformers import AutoConfig
 from transformers import AutoModelForCausalLM
+from transformers import AutoModelForImageTextToText
 from transformers import BitsAndBytesConfig
 from transformers import StoppingCriteria
 from transformers import StoppingCriteriaList
@@ -19,6 +20,18 @@ from huggingface_hub import snapshot_download
 
 from sep.uncertainty.models.base_model import BaseModel
 from sep.uncertainty.models.base_model import STOP_SEQUENCES
+
+
+def resolve_model_path(model_name, hub_org):
+    """Prefer a locally downloaded snapshot over a Hub id.
+
+    Looks under `$SEP_MODELS_DIR` (default `/proj/MR_dataset/models`) for a
+    directory named exactly `model_name`; falls back to `<hub_org>/<model_name>`
+    for a normal Hub download.
+    """
+    models_dir = os.getenv('SEP_MODELS_DIR', '/proj/MR_dataset/models')
+    local = os.path.join(models_dir, model_name)
+    return local if os.path.isdir(local) else f'{hub_org}/{model_name}'
 
 
 class StoppingCriteriaSub(StoppingCriteria):
@@ -95,6 +108,13 @@ class HuggingfaceModel(BaseModel):
         if stop_sequences == 'default':
             stop_sequences = STOP_SEQUENCES
         print(model_name)
+        # Single-visible-GPU loading. `device_map='auto'` shards a model across
+        # every visible GPU, and cross-device .generate() produces NaN logits
+        # under transformers 5.x (verified on this box). The pipeline is meant
+        # to run one model per GPU (see slurm/run_multigpu.sh, which pins each
+        # shard via CUDA_VISIBLE_DEVICES), so pin to a single device here. The
+        # genuinely-too-big-for-one-card path (70b) keeps its explicit sharding.
+        self._is_multimodal_wrapper = False
         if 'llama' in model_name.lower():
 
             if model_name.endswith('-8bit'):
@@ -112,19 +132,14 @@ class HuggingfaceModel(BaseModel):
             else:
                 base = 'huggyllama'
 
+            model_id = resolve_model_path(model_name, base)
             self.tokenizer = AutoTokenizer.from_pretrained(
-                f"{base}/{model_name}", device_map="auto",
-                token_type_ids=None)
+                model_id, token_type_ids=None)
 
             llama65b = '65b' in model_name.lower() and base == 'huggyllama'
             llama2or3_70b = '70b' in model_name.lower() and base == 'meta-llama'
 
-            if ('7b' in model_name or '13b' in model_name) or eightbit:
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    f"{base}/{model_name}", device_map="auto",
-                    max_memory={0: '80GIB'}, **kwargs,)
-
-            elif llama2or3_70b or llama65b:
+            if llama2or3_70b or llama65b:
                 path = snapshot_download(
                     repo_id=f'{base}/{model_name}',
                     allow_patterns=['*.json', '*.model', '*.safetensors'],
@@ -138,7 +153,7 @@ class HuggingfaceModel(BaseModel):
                     max_mem = 17.5 * 4686198491
                 else:
                     max_mem = 15 * 4686198491
-                
+
                 device_map = accelerate.infer_auto_device_map(
                     self.model.model,
                     max_memory={0: max_mem, 1: max_mem},
@@ -153,7 +168,9 @@ class HuggingfaceModel(BaseModel):
                     dtype='float16', skip_keys='past_key_values')
 
             else:
-                raise ValueError
+                # 7b/8b/13b (and any quantized variant): fits on a single card.
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_id, device_map='cuda', dtype=torch.bfloat16, **kwargs,)
 
         elif 'mistral' in model_name.lower():
 
@@ -161,29 +178,43 @@ class HuggingfaceModel(BaseModel):
                 kwargs = {'quantization_config': BitsAndBytesConfig(
                     load_in_8bit=True,)}
                 model_name = model_name[:-len('-8bit')]
-            if model_name.endswith('-4bit'):
+            elif model_name.endswith('-4bit'):
                 kwargs = {'quantization_config': BitsAndBytesConfig(
                     load_in_4bit=True,)}
-                model_name = model_name[:-len('-8bit')]
+                model_name = model_name[:-len('-4bit')]
             else:
                 kwargs = {}
 
-            model_id = f'mistralai/{model_name}'
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
-                clean_up_tokenization_spaces=False)
-
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                device_map='auto',
-                max_memory={0: '80GIB'},
-                **kwargs,
-            )
+            model_id = resolve_model_path(model_name, 'mistralai')
+            config = AutoConfig.from_pretrained(model_id)
+            if config.model_type == 'mistral3':
+                # Mistral-Small-3.x-Instruct is a multimodal wrapper
+                # (Mistral3ForConditionalGeneration): not in the causal-LM
+                # auto-map, so load via image-text-to-text and generate through
+                # the language submodule.
+                # NOTE: transformers 5.14.1's AutoTokenizer conversion of this
+                # checkpoint's tekken.json yields vocab_size 151000 vs the
+                # model's 131072 embedding table -- IDs misalign and generation
+                # is garbage. Use the official `mistral-common` tokenizer for
+                # these checkpoints (not yet wired here); AutoTokenizer is
+                # unusable for Mistral-Small-3.2-24B.
+                self._is_multimodal_wrapper = True
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_id, token_type_ids=None,
+                    clean_up_tokenization_spaces=False)
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    model_id, device_map='auto', dtype=torch.bfloat16, **kwargs,)
+            else:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_id, token_type_ids=None,
+                    clean_up_tokenization_spaces=False)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_id, device_map='cuda', dtype=torch.bfloat16, **kwargs,)
 
         elif 'falcon' in model_name:
             model_id = f'tiiuae/{model_name}'
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
+                model_id, token_type_ids=None,
                 clean_up_tokenization_spaces=False)
 
             kwargs = {'quantization_config': BitsAndBytesConfig(
@@ -192,42 +223,42 @@ class HuggingfaceModel(BaseModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                device_map='auto',
+                device_map='cuda',
                 **kwargs,
             )
         elif 'phi' in model_name.lower():
-            model_id = f'microsoft/{model_name}'  # e.g. Phi-3-mini-128k-instruct
+            model_id = resolve_model_path(model_name, 'microsoft')  # e.g. phi-4
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
+                model_id, token_type_ids=None,
                 clean_up_tokenization_spaces=False)
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                device_map='auto',
+                device_map='cuda',
+                dtype=torch.bfloat16,
             )
         elif 'gemma' in model_name:
-            model_id = f'google/{model_name}'  # e.g. gemma-7b-it
+            model_id = resolve_model_path(model_name, 'google')  # e.g. gemma-4-12B
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
+                model_id, token_type_ids=None,
                 clean_up_tokenization_spaces=False)
+            # gemma-4 (Gemma4UnifiedForConditionalGeneration) is multimodal but
+            # is registered in the causal-LM auto-map, so AutoModelForCausalLM
+            # resolves it and .generate() returns top-level hidden_states.
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                device_map='auto',
-                torch_dtype=torch.bfloat16
+                device_map='cuda',
+                dtype=torch.bfloat16,
             )
         elif 'qwen' in model_name.lower():
-            # Prefer a locally downloaded snapshot (e.g. /build_bak/models/Qwen3-8B),
-            # falling back to the Hub id Qwen/<model_name>.
-            models_dir = os.getenv('SEP_MODELS_DIR', '/build_bak/models')
-            local_path = os.path.join(models_dir, model_name)
-            model_id = local_path if os.path.isdir(local_path) else f'Qwen/{model_name}'
+            model_id = resolve_model_path(model_name, 'Qwen')
             self.tokenizer = AutoTokenizer.from_pretrained(
-                model_id, device_map='auto', token_type_ids=None,
+                model_id, token_type_ids=None,
                 clean_up_tokenization_spaces=False)
             qwen_kwargs = dict(
-                device_map='auto',
-                torch_dtype=torch.bfloat16,
+                device_map='cuda',
+                dtype=torch.bfloat16,
             )
             try:
                 import flash_attn  # noqa: F401
@@ -238,6 +269,18 @@ class HuggingfaceModel(BaseModel):
                 qwen_kwargs['attn_implementation'] = 'sdpa'
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id, **qwen_kwargs)
+        elif 'olmoe' in model_name.lower():
+            # Sparse MoE (e.g. OLMoE-1B-7B-0924): same loading pattern as Qwen,
+            # `output_router_logits` is a `.forward()`-only kwarg (not propagated
+            # through `.generate()` in this transformers version), so a caller
+            # wanting router logits must do a second forward pass on the full
+            # generated sequence -- see `sep.moe.generate_olmoe`.
+            model_id = resolve_model_path(model_name, 'allenai')
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_id, token_type_ids=None,
+                clean_up_tokenization_spaces=False)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_id, device_map='cuda', dtype=torch.bfloat16)
         else:
             raise ValueError
 
@@ -246,6 +289,12 @@ class HuggingfaceModel(BaseModel):
         if 'Llama-2' in model_name:
             self.token_limit = 4096
         elif 'qwen' in model_name.lower():
+            self.token_limit = 8192
+        elif 'olmoe' in model_name.lower():
+            self.token_limit = 4096
+        elif any(k in model_name.lower() for k in ('llama-3', 'mistral', 'phi', 'gemma')):
+            # Modern models with >=16k context; the few-shot prompt alone can
+            # exceed the legacy 2048 guard, so raise it well clear of it.
             self.token_limit = 8192
         else:
             self.token_limit = 2048
@@ -304,7 +353,21 @@ class HuggingfaceModel(BaseModel):
         if full_answer.startswith(input_data):
             input_data_offset = len(input_data)
         else:
-            raise ValueError('Have not tested this in a while.')
+            # Newer tokenizers (e.g. Llama-3) may not re-decode the prompt
+            # byte-for-byte identical to `input_data`, so `startswith` fails.
+            # Recover the offset by decoding the input portion of the actual
+            # output sequence the same way `full_answer` was decoded.
+            n_input_token = len(inputs['input_ids'][0])
+            decoded_input = self.tokenizer.decode(
+                outputs.sequences[0][:n_input_token], skip_special_tokens=True)
+            if full_answer.startswith(decoded_input):
+                input_data_offset = len(decoded_input)
+            else:
+                raise ValueError(
+                    'Could not strip prompt from generation.\n'
+                    f'input_data: >{input_data}<\n'
+                    f'decoded_input: >{decoded_input}<\n'
+                    f'full_answer: >{full_answer}<')
 
         # Remove input from answer.
         answer = full_answer[input_data_offset:]
@@ -401,16 +464,27 @@ class HuggingfaceModel(BaseModel):
 
         return return_values
 
-    def _slice_answer(self, full_answer, input_data):
+    def _slice_answer(self, full_answer, input_data, decoded_input=None):
         """Strip prompt and stop sequences from a decoded generation.
 
         Returns (sliced_answer, n_generated) where n_generated is the number of
         generated tokens up to (and excluding) the stop sequence.
+
+        `decoded_input`, if given, is the prompt re-decoded from the output
+        sequence's own input tokens; used as a fallback when a newer tokenizer
+        (e.g. Llama-3) does not reproduce `input_data` byte-for-byte and the
+        exact-prefix check fails.
         """
         if full_answer.startswith(input_data):
             input_data_offset = len(input_data)
+        elif decoded_input is not None and full_answer.startswith(decoded_input):
+            input_data_offset = len(decoded_input)
         else:
-            raise ValueError('Have not tested this in a while.')
+            raise ValueError(
+                'Could not strip prompt from generation.\n'
+                f'input_data: >{input_data}<\n'
+                f'decoded_input: >{decoded_input}<\n'
+                f'full_answer: >{full_answer}<')
 
         answer = full_answer[input_data_offset:]
 
@@ -490,8 +564,12 @@ class HuggingfaceModel(BaseModel):
 
             full_answer = self.tokenizer.decode(
                 outputs.sequences[s], skip_special_tokens=True)
+            # Re-decode the prompt tokens the same way as `full_answer`, as a
+            # fallback for tokenizers that don't reproduce `input_data` exactly.
+            decoded_input = self.tokenizer.decode(
+                outputs.sequences[s][:n_input_token], skip_special_tokens=True)
             sliced_answer, token_stop_index = self._slice_answer(
-                full_answer, input_data)
+                full_answer, input_data, decoded_input=decoded_input)
             n_generated = token_stop_index - n_input_token
             if n_generated <= 0:
                 logging.warning(

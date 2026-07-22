@@ -1,0 +1,9 @@
+# Full generation preset: `sep-generate --config qwen3-8b` is self-contained.
+model_name: Qwen3-8B
+model_max_new_tokens: 50
+
+dataset: trivia_qa
+num_samples: 2000
+num_generations: 10
+random_seed: 20
+experiment_lot: qwen3_8b_trivia_qa_2000

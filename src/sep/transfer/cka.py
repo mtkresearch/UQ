@@ -10,6 +10,7 @@ Outputs a heatmap PDF and a JSON of the best target layer per source layer, whic
 drives the layer pairing used when fitting the transfer map in step 2.
 """
 import argparse
+from sep.uncertainty.utils.config import apply_yaml_config
 import json
 import os
 import pickle
@@ -87,7 +88,7 @@ def main():
     p.add_argument("--token", default="slt", choices=["slt", "tbg"])
     p.add_argument("--out-dir", required=True)
     p.add_argument("--r2-alpha", type=float, default=1e2)
-    args = p.parse_args()
+    args = apply_yaml_config(p)
 
     Hs, ids_s = load_hidden(args.source_gen, args.token)
     Ht, ids_t = load_hidden(args.target_gen, args.token)

@@ -1,0 +1,67 @@
+# Base configuration for the SEP pipeline.
+#
+# These values are the single source of truth for argparse defaults in
+# `sep.uncertainty.utils.utils.get_parser`. Any CLI flag still overrides the
+# value here (precedence: CLI > YAML > code fallback), and unknown keys are
+# ignored by argparse. Per-model / per-dataset overrides live in sibling files
+# and are merged on top of this one via omegaconf.
+
+# --- Shared (both stages) --------------------------------------------------
+debug: false
+entity: null            # falls back to $WANDB_SEM_UNC_ENTITY at parse time
+random_seed: 10
+metric: squad           # squad | llm | llm_gpt-3.5 | llm_gpt-4
+compute_accuracy_at_all_temps: true
+experiment_lot: Unnamed Experiment
+# Base output dir. Generation writes wandb runs under <out_dir>/<user>/uncertainty
+# (unless SCRATCH_DIR env is set, which still wins); the transfer/moe scripts that
+# take --out-dir default to it. Relative to the current working directory.
+out_dir: ./sep_scratch
+
+# --- Generate stage --------------------------------------------------------
+model_name: Llama-2-7b-chat
+model_max_new_tokens: 50
+dataset: trivia_qa       # trivia_qa | squad | bioasq | nq | svamp
+ood_train_dataset: null
+num_samples: 400
+num_few_shot: 5
+p_true_num_fewshot: 20
+p_true_hint: false
+num_generations: 10
+temperature: 1.0
+use_mc_options: true
+get_training_set_generations: true
+use_context: false
+get_training_set_generations_most_likely_only: true
+compute_p_true: true
+brief_always: false
+enable_brief: true
+brief_prompt: default
+prompt_type: default
+compute_uncertainties: true
+answerable_only: false
+num_shards: 1
+shard_index: 0
+
+# --- Compute stage ---------------------------------------------------------
+recompute_accuracy: false
+eval_wandb_runid: null
+train_wandb_runid: null
+num_eval_samples: 10000000000000000000
+compute_predictive_entropy: true
+compute_p_ik: true
+compute_p_ik_answerable: false
+compute_context_entails_response: false
+analyze_run: true
+assign_new_wandb_id: true
+restore_entity_eval: null   # falls back to $WANDB_SEM_UNC_ENTITY at parse time
+restore_entity_train: null  # falls back to $WANDB_SEM_UNC_ENTITY at parse time
+condition_on_question: true
+strict_entailment: true
+use_all_generations: true
+use_num_generations: -1
+entailment_model: deberta
+entailment_cache_id: null
+entailment_cache_only: false
+compute_p_true_in_compute_stage: false
+reuse_entailment_model: false
