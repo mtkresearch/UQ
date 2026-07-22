@@ -1,0 +1,40 @@
+{
+  "dataset": "offline-run-20260722_024333-iqr1e2n3",
+  "source_model": "Llama-2-7b",
+  "target_model": "Mistral-7B-v0.1",
+  "token": "slt",
+  "n": 2000,
+  "src_layer": 14,
+  "tgt_layer": 18,
+  "src_layer_se_auroc": 0.7789116421038246,
+  "tgt_layer_se_auroc": 0.7663142797658979,
+  "source_probe_pool_auroc": 0.9998582389563258,
+  "task1_disagreement": {
+    "n": 2000,
+    "table": {
+      "source_certain__target_certain": 1090,
+      "source_certain__target_uncertain": 193,
+      "source_uncertain__target_certain": 230,
+      "source_uncertain__target_uncertain": 487
+    },
+    "source_pos_rate": 0.3585,
+    "target_pos_rate": 0.34,
+    "positive_rate_mismatch": 0.01849999999999996,
+    "disagreement_rate": 0.2115,
+    "disagreement_count": 423,
+    "agreement_rate": 0.7885,
+    "src_certain_tgt_uncertain_rate": 0.0965,
+    "src_uncertain_tgt_certain_rate": 0.115
+  },
+  "task2_alignment_logit_error": {
+    "alpha": 10000.0,
+    "mean": -0.11167994452856393,
+    "rms": 5.053606379046665,
+    "mean_abs": 4.120929934890282,
+    "std": 5.052372217516366,
+    "p05": -8.443974497968055,
+    "p50": 0.3913038180946833,
+    "p95": 7.525135494260179,
+    "max_abs": 18.43266981456042
+  }
+}
