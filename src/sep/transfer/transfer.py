@@ -66,6 +66,28 @@ def binarize(ents, thr):
     return (ents >= thr).astype(np.int64)
 
 
+def align_ids(ids_s, ids_t):
+    """Index array `order` such that [ids_t[i] for i in order] == ids_s.
+
+    Multi-GPU sharding can scramble the ROW ORDER of a run without changing the
+    example-id SET (shards are merged in completion order). Reordering the target
+    to the source order restores the row-for-row pairing the transfer relies on.
+    Hard-fail if the sets genuinely differ: then the rows are not the same
+    examples (e.g. runs from different RNG states / folders) and no reordering
+    can make the transfer valid.
+    """
+    if ids_s == ids_t:
+        return np.arange(len(ids_s))
+    set_s, set_t = set(ids_s), set(ids_t)
+    if set_s != set_t:
+        raise ValueError(
+            f"example-id SETS differ: {len(set_s & set_t)} shared, "
+            f"{len(set_s - set_t)} only in source, {len(set_t - set_s)} only in "
+            f"target -- runs are not on the same examples, cannot transfer.")
+    pos = {k: i for i, k in enumerate(ids_t)}
+    return np.array([pos[k] for k in ids_s], dtype=int)
+
+
 # --------------------------------------------------------------------------- #
 # Per-layer SE layer selection
 # --------------------------------------------------------------------------- #
@@ -144,10 +166,14 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3)
 
     Hs, ids_s = load_hidden(source_gen, token)   # (Ls, N, ds)
     Ht, ids_t = load_hidden(target_gen, token)   # (Lt, N, dt)
-    assert ids_s == ids_t, "example ids not aligned across models"
+    # Reorder target rows to the source id order (no-op when already aligned;
+    # fixes shard-scrambled order; hard-fails if the id SETS genuinely differ).
+    order = align_ids(ids_s, ids_t)
+    Ht, ids_t = Ht[:, order], [ids_t[i] for i in order]
     N = Hs.shape[1]
 
-    ent_s, ent_t = load_entropy(source_gen), load_entropy(target_gen)
+    ent_s = load_entropy(source_gen)
+    ent_t = load_entropy(target_gen)[order]
     ys = binarize(ent_s, best_split(ent_s))
     yt = binarize(ent_t, best_split(ent_t))
     print(f"N={N} src pos-rate={ys.mean():.3f} tgt pos-rate={yt.mean():.3f}")
