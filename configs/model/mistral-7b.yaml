@@ -1,0 +1,9 @@
+# Full generation preset: `sep-generate --config mistral-7b` is self-contained.
+model_name: Mistral-7B-v0.1
+model_max_new_tokens: 50
+
+dataset: trivia_qa
+num_samples: 2000
+num_generations: 10
+random_seed: 20
+experiment_lot: mistral7b_trivia_qa_2000

@@ -1,0 +1,9 @@
+# Full generation preset: `sep-generate --config llama-2-7b` is self-contained.
+model_name: Llama-2-7b
+model_max_new_tokens: 50
+
+dataset: trivia_qa
+num_samples: 2000
+num_generations: 10
+random_seed: 20
+experiment_lot: llama2_7b_trivia_qa_2000
