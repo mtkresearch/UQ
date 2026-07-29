@@ -79,7 +79,24 @@ export WANDB_SEM_UNC_ENTITY="${WANDB_SEM_UNC_ENTITY:-offline}"
 # --- Paths ------------------------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
-# source .venv/bin/activate
+# Resolve Python interpreter and PYTHONPATH so background subshells inherit them.
+# Priority: PYTHON env var > .venv in repo > sep_intra_env fallback.
+# Use PYTHON=/path/to/python bash slurm/run_multigpu.sh ... to override explicitly.
+if [[ -z "${PYTHON:-}" ]]; then
+    if [[ -f "$REPO_ROOT/.venv/bin/python" ]]; then
+        PYTHON="$REPO_ROOT/.venv/bin/python"
+    elif [[ -f /build_bak/UQ/sep_intra_env/bin/python ]]; then
+        # Resolve symlink so the path is valid on any machine, not just the one
+        # where /proj is mounted.
+        PYTHON="$(readlink -f /build_bak/UQ/sep_intra_env/bin/python)"
+    else
+        PYTHON="$(which python3 || which python)"
+    fi
+fi
+export PYTHON
+export PATH="$(dirname "$PYTHON"):$PATH"
+export PYTHONPATH="${PYTHONPATH:-$REPO_ROOT/src}"
+echo "Using Python: $PYTHON"
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_TAG="${CONFIG_TAG}_${TIMESTAMP}"
@@ -104,7 +121,7 @@ for ((i = 0; i < NUM_GPUS; i++)); do
         # Each shard isolates its wandb output under its own scratch dir so the
         # merge step can locate exactly one set of pkls per shard.
         export SCRATCH_DIR="$shard_dir"
-        python -m sep.generate_answers \
+        "$PYTHON" -m sep.generate_answers \
             "${CONFIG_ARGS[@]}" \
             "${PASSTHROUGH_ARGS[@]}" \
             --num_shards="$NUM_GPUS" \
@@ -136,7 +153,7 @@ echo "All shards finished. Merging + computing uncertainty measures."
 export CUDA_VISIBLE_DEVICES="${GPU_LIST[0]}"
 export SCRATCH_DIR="$SHARDS_PARENT/merged"
 mkdir -p "$SCRATCH_DIR"
-python -m sep.merge_shards \
+"$PYTHON" -m sep.merge_shards \
     "${CONFIG_ARGS[@]}" \
     --shards_parent="$SHARDS_PARENT" \
     2>&1 | tee "$LOG_DIR/merge.log"
