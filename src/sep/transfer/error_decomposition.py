@@ -191,25 +191,31 @@ def run(source_gen, target_gen, token, out_dir, n_eval, seed, alpha,
 
 
 def _plot_hists(E1, E2, E3, total, gap, r, token, out_dir, base):
-    """Histogram per term + total + the logit gap, with mean/std annotated."""
+    """Histogram per term + identity verification (LHS vs E1+E2+E3) + logit gap."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    sum_terms = E1 + E2 + E3
+    resid = total - sum_terms
+    resid_max = float(np.max(np.abs(resid)))
+
     dis = r["disagreement"]
-    e3_title = (f"E3: model disagreement  y_s - y_t\n"
+    e3_title = (f"E3: model disagreement  $y_s - y_t$\n"
                 f"disagreement rate = {dis['disagreement_rate']:.1%} "
                 f"({dis['disagreement_count']}/{r['n_terms_evaluated']})")
-    panels = [
-        ("E1_source_probe", E1, "#4C72B0", "E1: source probe error  p_s - y_s"),
-        ("E2_alignment", E2, "#8172B3", "E2: alignment error  f_s(Rh_t) - f_s(h_s)"),
-        ("E3_disagreement", E3, "#CCB974", e3_title),
-        ("total_transfer_error", total, "#C44E52", "total transfer error  p_{s->t} - y_t"),
-    ]
-    fig, axes = plt.subplots(2, 3, figsize=(17, 8))
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 8))
     ax_list = axes.ravel()
-    for ax, (key, x, color, title) in zip(ax_list, panels):
+
+    # Row 1: three error terms + logit gap
+    term_panels = [
+        ("E1_source_probe",  E1,  "#4C72B0", r"$E_1$: source probe error  $\hat{p}_s - y_s$"),
+        ("E2_alignment",     E2,  "#8172B3", r"$E_2$: alignment error  $f_s(Rh_t) - f_s(h_s)$"),
+        ("E3_disagreement",  E3,  "#CCB974", e3_title),
+    ]
+    for ax, (key, x, color, title) in zip(ax_list[:3], term_panels):
         s = r["terms"][key]
-        # E3 is discrete {-1,0,1}: use fixed bins so bars are readable.
         bins = np.array([-1.5, -0.5, 0.5, 1.5]) if key == "E3_disagreement" else 80
         ax.hist(x, bins=bins, color=color, edgecolor="white", linewidth=0.3)
         ax.axvline(0, color="k", lw=0.8)
@@ -222,9 +228,8 @@ def _plot_hists(E1, E2, E3, total, gap, r, token, out_dir, base):
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", ls="--", lw=0.4, alpha=0.6)
 
-    # Panel 5: the raw logit gap w_s^T(R h_t - h_s); |E2| <= |gap|/4 (Lipschitz).
-    gb = r["terms"]["E2_logit_gap_bound"]  # stats of |gap|/4
-    ax = ax_list[4]
+    # Panel [0,3]: logit gap
+    ax = ax_list[3]
     ax.hist(gap, bins=80, color="#55A868", edgecolor="white", linewidth=0.3)
     ax.axvline(0, color="k", lw=0.8)
     ax.axvline(float(gap.mean()), color="#C44E52", lw=1.5, ls="--",
@@ -237,7 +242,43 @@ def _plot_hists(E1, E2, E3, total, gap, r, token, out_dir, base):
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", ls="--", lw=0.4, alpha=0.6)
 
-    ax_list[5].axis("off")  # spare cell
+    # Row 2: identity verification — LHS, E1+E2+E3, residual; spare cell off
+    bins_id = np.linspace(-1.2, 1.2, 81)
+    s_total = r["terms"]["total_transfer_error"]
+
+    # Panel [1,0]: LHS computed directly
+    ax = ax_list[4]
+    ax.hist(total, bins=bins_id, color="#C44E52", edgecolor="white", linewidth=0.3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.axvline(s_total["mean"], color="k", lw=1.5, ls="--",
+               label=f"mean={s_total['mean']:+.4f}")
+    ax.set_title(r"LHS (direct):  $\hat{p}_{s\to t}(x) - y_t(x)$", fontsize=10)
+    ax.set_ylabel("queries"); ax.set_xlabel("error value")
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", ls="--", lw=0.4, alpha=0.6)
+
+    # Panel [1,1]: RHS = E1+E2+E3
+    ax = ax_list[5]
+    ax.hist(sum_terms, bins=bins_id, color="#4C72B0", edgecolor="white", linewidth=0.3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.axvline(float(sum_terms.mean()), color="k", lw=1.5, ls="--",
+               label=f"mean={sum_terms.mean():+.4f}")
+    ax.set_title(r"RHS (sum):  $E_1 + E_2 + E_3$", fontsize=10)
+    ax.set_ylabel("queries"); ax.set_xlabel("error value")
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", ls="--", lw=0.4, alpha=0.6)
+
+    # Panel [1,2]: residual LHS - RHS
+    ax = ax_list[6]
+    ax.hist(resid, bins=80, color="#55A868", edgecolor="white", linewidth=0.3)
+    ax.axvline(0, color="k", lw=0.8)
+    ax.set_title(f"Residual: LHS $-$ RHS\nmax|·| = {resid_max:.2e}  (identity check)",
+                 fontsize=10)
+    ax.set_ylabel("queries"); ax.set_xlabel("residual value")
+    ax.grid(True, axis="y", ls="--", lw=0.4, alpha=0.6)
+
+    ax_list[7].axis("off")
+
     fig.suptitle(f"{r['source_model']}→{r['target_model']} error terms "
                  f"({token.upper()}, α={r['alpha']:.0e}, eval_on={r['eval_on']}, "
                  f"n={r['n_terms_evaluated']})", fontsize=12)

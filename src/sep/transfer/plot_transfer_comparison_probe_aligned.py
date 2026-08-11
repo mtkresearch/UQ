@@ -41,17 +41,19 @@ import matplotlib.pyplot as plt
 
 # Colours and markers shared across both figures
 STYLE = {
-    "A":   dict(marker="o", ls="-",  color="#333333"),
-    "B_r": dict(marker="s", ls="--", color="#4C72B0"),
-    "B_p": dict(marker="^", ls="--", color="#DD8452"),
+    "A":    dict(marker="o", ls="-",  color="#333333"),
+    "B_r":  dict(marker="s", ls="--", color="#4C72B0"),
+    "B_p":  dict(marker="^", ls="--", color="#DD8452"),
     "B_pa": dict(marker="D", ls="--", color="#9467BD"),
-    "B_e": dict(marker="P", ls="--", color="#C44E52"),
-    "C":   dict(marker="v", ls=":",  color="#55A868"),
+    "B_e":  dict(marker="P", ls="--", color="#C44E52"),
+    "B_em": dict(marker="X", ls="--", color="#2CA02C"),
+    "C":    dict(marker="v", ls=":",  color="#55A868"),
 }
 
 
-def load_results(pairs_dir, pair_names, token, alpha):
+def load_results(pairs_dir, pair_names, token, alpha, out_suffix=""):
     suffix = "" if alpha == 1e3 else f"_a{alpha:.0e}"
+    suffix += out_suffix
     data = {}
     for name in pair_names:
         path = os.path.join(pairs_dir, name, f"transfer_{token}{suffix}.json")
@@ -73,9 +75,9 @@ def build_summary(data, pair_names, pair_labels, pair_types):
         g = r["n_grid"]
         full_n = max(g)
         i = g.index(full_n)
-        a   = r["curveA_native"][i]
-        br  = r["curveB_ridge"][i]
-        bp  = r["curveB_procrustes"][i]
+        a   = r["curveA_native"][i]       if "curveA_native"       in r else None
+        br  = r["curveB_ridge"][i]        if "curveB_ridge"        in r else None
+        bp  = r["curveB_procrustes"][i]   if "curveB_procrustes"   in r else None
         be2 = r["curveB_e2_minimised"][i] if "curveB_e2_minimised" in r else None
         thr = 0.95 * a if a is not None else None
         nb  = next((g[j] for j, v in enumerate(r["curveB_ridge"])
@@ -99,8 +101,9 @@ def build_summary(data, pair_names, pair_labels, pair_types):
 
 
 def _draw_panel(ax, g, r, label, ptype, x_is_probe_budget):
-    A = _nan(r["curveA_native"])
-    ax.plot(g, A, label="A: native target (labeled)", **STYLE["A"])
+    if "curveA_native" in r:
+        ax.plot(g, _nan(r["curveA_native"]),
+                label="A: native target (labeled)", **STYLE["A"])
     if x_is_probe_budget:
         if "curveB_ridge_src_probe_budget" in r:
             ax.plot(g, _nan(r["curveB_ridge_src_probe_budget"]),
@@ -114,20 +117,28 @@ def _draw_panel(ax, g, r, label, ptype, x_is_probe_budget):
         if "curveB_e2_src_probe_budget" in r:
             ax.plot(g, _nan(r["curveB_e2_src_probe_budget"]),
                     label="B: E2-minimised (refit)", **STYLE["B_e"])
+        if "curveB_e2_map_src_probe_budget" in r:
+            ax.plot(g, _nan(r["curveB_e2_map_src_probe_budget"]),
+                    label=f"B: E2-map (λ={r.get('lam_e2_map', '?'):.0e})", **STYLE["B_em"])
         if "curveC_source_native" in r:
             ax.plot(g, _nan(r["curveC_source_native"]),
                     label="C: native source (labeled)", **STYLE["C"])
     else:
-        ax.plot(g, r["curveB_ridge"],
-                label="B: ridge", **STYLE["B_r"])
-        ax.plot(g, r["curveB_procrustes"],
-                label="B: Procrustes", **STYLE["B_p"])
+        if "curveB_ridge" in r:
+            ax.plot(g, r["curveB_ridge"],
+                    label="B: ridge", **STYLE["B_r"])
+        if "curveB_procrustes" in r:
+            ax.plot(g, r["curveB_procrustes"],
+                    label="B: Procrustes", **STYLE["B_p"])
         if "curveB_probe_aligned" in r:
             ax.plot(g, r["curveB_probe_aligned"],
                     label="B: probe-aligned", **STYLE["B_pa"])
         if "curveB_e2_minimised" in r:
             ax.plot(g, r["curveB_e2_minimised"],
                     label="B: E2-minimised", **STYLE["B_e"])
+        if "curveB_e2_map" in r:
+            ax.plot(g, r["curveB_e2_map"],
+                    label=f"B: E2-map (λ={r.get('lam_e2_map', '?'):.0e})", **STYLE["B_em"])
         if "curveC_source_native" in r:
             ax.plot(g, _nan(r["curveC_source_native"]),
                     label="C: native source (labeled)", **STYLE["C"])
@@ -144,7 +155,7 @@ def _draw_panel(ax, g, r, label, ptype, x_is_probe_budget):
 
 
 def plot_all_pairs(data, pair_names, pair_labels, pair_types,
-                   token, alpha, out_dir, x_is_probe_budget):
+                   token, alpha, out_dir, x_is_probe_budget, out_suffix="", lam_e2_map=None):
     n = len(pair_names)
     ncols = 3
     nrows = (n + ncols - 1) // ncols
@@ -158,13 +169,15 @@ def plot_all_pairs(data, pair_names, pair_labels, pair_types,
         ax.axis("off")
 
     alpha_txt = f", α={alpha:.0e}" if alpha != 1e3 else ""
+    lam_txt   = f", λ={lam_e2_map:.0e}" if lam_e2_map is not None else ""
     xkind = "probe training budget" if x_is_probe_budget else "map alignment budget"
     fig.suptitle(
-        f"SEP cross-model transfer ({token.upper()}{alpha_txt}) — {xkind}",
+        f"SEP cross-model transfer ({token.upper()}{alpha_txt}{lam_txt}) — {xkind}",
         fontsize=13)
     plt.tight_layout()
 
     suffix = "" if alpha == 1e3 else f"_a{alpha:.0e}"
+    suffix += out_suffix
     tag = "probebudget" if x_is_probe_budget else "mapbudget"
     p = os.path.join(out_dir, f"ALL_pairs_{tag}_{token}{suffix}.png")
     plt.savefig(p, dpi=150)
@@ -188,22 +201,27 @@ def _print_summary(rows):
               f"{(r['B_ridge_minus_A'] or 0):>+7.3f}{(r['B_e2_minus_A'] or 0):>+7.3f}")
 
 
-def run(pairs_dir, pair_names, pair_labels, pair_types, token, alpha, out_dir):
+def run(pairs_dir, pair_names, pair_labels, pair_types, token, alpha, out_dir,
+        out_suffix="", lam_e2_map=None, probe_budget_only=False):
     os.makedirs(out_dir, exist_ok=True)
-    data = load_results(pairs_dir, pair_names, token, alpha)
+    data = load_results(pairs_dir, pair_names, token, alpha, out_suffix=out_suffix)
     summary = build_summary(data, pair_names, pair_labels, pair_types)
 
     suffix = "" if alpha == 1e3 else f"_a{alpha:.0e}"
+    suffix += out_suffix
     summary_path = os.path.join(out_dir, f"ALL_pairs_summary_{token}{suffix}.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"saved summary -> {summary_path}")
 
     _print_summary(summary)
+    if not probe_budget_only:
+        plot_all_pairs(data, pair_names, pair_labels, pair_types,
+                       token, alpha, out_dir, x_is_probe_budget=False,
+                       out_suffix=out_suffix, lam_e2_map=lam_e2_map)
     plot_all_pairs(data, pair_names, pair_labels, pair_types,
-                   token, alpha, out_dir, x_is_probe_budget=False)
-    plot_all_pairs(data, pair_names, pair_labels, pair_types,
-                   token, alpha, out_dir, x_is_probe_budget=True)
+                   token, alpha, out_dir, x_is_probe_budget=True,
+                   out_suffix=out_suffix, lam_e2_map=lam_e2_map)
 
 
 def main():
@@ -215,6 +233,12 @@ def main():
     p.add_argument("--pair-types",  nargs="+", default=None)
     p.add_argument("--token", default="slt", choices=["slt", "tbg"])
     p.add_argument("--alpha", type=float, default=1e3)
+    p.add_argument("--lam-e2-map", type=float, default=None,
+                   help="lambda used for E2-map (shown in title; used for out-suffix)")
+    p.add_argument("--out-suffix", default="",
+                   help="suffix appended to input JSON filenames and output PNG filenames")
+    p.add_argument("--probe-budget-only", action="store_true",
+                   help="skip the map-budget figure (useful for lambda sweeps)")
     p.add_argument("--out-dir", default=None)
     a = p.parse_args()
     n = len(a.pair_names)
@@ -223,7 +247,9 @@ def main():
     assert len(labels) == n, "--pair-labels must match --pair-names length"
     assert len(types)  == n, "--pair-types must match --pair-names length"
     out = a.out_dir if a.out_dir else a.pairs_dir
-    run(a.pairs_dir, a.pair_names, labels, types, a.token, a.alpha, out)
+    run(a.pairs_dir, a.pair_names, labels, types, a.token, a.alpha, out,
+        out_suffix=a.out_suffix, lam_e2_map=a.lam_e2_map,
+        probe_budget_only=a.probe_budget_only)
 
 
 if __name__ == "__main__":
