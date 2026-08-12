@@ -1,7 +1,9 @@
 #!/bin/bash
-# Compute target_probe (curve A) and source_probe (curve C) once per pair.
-# These do not depend on alpha or lambda so only need to run once.
-# Output: transfer_slt_baselines.json per pair.
+# E2-R* lambda sweep — e2_rstar curve only.
+# R* uses labeled target entropy values directly as regression targets.
+# alpha_eff = lam / ||w_s||^2 (n-independent, 1/n dropped from data term).
+# Same lambda range as e2_r0: lam=1..1e4 covers alpha_eff~0.05..500.
+# Output per pair: transfer_slt_lam<lam>_e2rstar.json for each lam.
 set -e
 
 PYTHON=/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python
@@ -38,21 +40,28 @@ TGTS=(
 
 N_PAIRS=${#NAMES[@]}
 
-echo "=== Baselines: target_probe + source_probe, 6 pairs ==="
+echo "=== E2-R* lambda sweep: 6 pairs x 5 lambda values ==="
 
-for (( i=0; i<N_PAIRS; i++ )); do
-    name="${NAMES[$i]}"
-    echo "  $name"
-    $PYTHON -m sep.transfer.transfer \
-        --source-gen "${SRCS[$i]}" \
-        --target-gen "${TGTS[$i]}" \
-        --token slt \
-        --n-eval 500 --n-grid 50 100 200 400 800 1500 \
-        --curves target_probe source_probe \
-        --metrics auroc error_rate \
-        --out-suffix "_baselines" \
-        --out-dir "$OUT_DIR/$name"
+for lam in 1 10 100 1000 10000; do
+    echo "  --- lambda=$lam ---"
+    for (( i=0; i<N_PAIRS; i++ )); do
+        echo "    ${NAMES[$i]}"
+        $PYTHON -m sep.transfer.transfer \
+            --source-gen "${SRCS[$i]}" \
+            --target-gen "${TGTS[$i]}" \
+            --token slt --lam-e2-map "$lam" \
+            --n-eval 500 --n-grid 50 100 200 400 800 1500 \
+            --curves e2_rstar \
+            --metrics auroc error_rate \
+            --out-suffix "_lam${lam}_e2rstar" \
+            --out-dir "$OUT_DIR/${NAMES[$i]}"
+    done
 done
 
 echo ""
-echo "=== Done. Output: transfer_slt_baselines.json per pair ==="
+echo "=== Done. Output per pair: transfer_slt_lam<lam>_e2rstar.json ==="
+echo "    e.g. transfer_slt_lam1_e2rstar.json"
+echo "         transfer_slt_lam10_e2rstar.json"
+echo "         transfer_slt_lam100_e2rstar.json"
+echo "         transfer_slt_lam1000_e2rstar.json"
+echo "         transfer_slt_lam10000_e2rstar.json"

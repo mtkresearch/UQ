@@ -168,6 +168,53 @@ def fit_probe_aligned_map(Zt, Zs, w_s, alpha=1e3):
     return M, b
 
 
+def fit_e2_r0_map(Zt, Zs, w_s, lam=1e3):
+    """R_0: probe-aware alignment, min_M ||w_s^T(Mh_t-h_s)||^2 + lam*||M||^2_F.
+
+    Keeps w_s fixed and penalises the Frobenius norm of M directly, unlike
+    fit_probe_aligned_map which penalises a_t = M w_s.  KKT shows the optimal
+    M is rank-1; p = M w_s solves the ridge system with alpha_eff = lam/||w_s||^2
+    (n-independent, so the same lam gives consistent regularisation across the
+    whole n-grid — unlike the 1/n-data-term variant where alpha_eff scales with n).
+    """
+    ws_sq = np.dot(w_s, w_s)
+    mu_t = Zt.mean(0)
+    A = Zt - mu_t
+    target = Zs @ w_s
+    mu_target = target.mean()
+    t = target - mu_target
+
+    d = A.shape[1]
+    p = np.linalg.solve(A.T @ A + (lam / ws_sq) * np.eye(d), A.T @ t)  # (d_t,)
+
+    M = np.outer(p, w_s) / ws_sq             # (d_t, d_s): M @ w_s = p exactly
+    b_scalar = mu_target - mu_t @ p
+    b = b_scalar * w_s / ws_sq
+    return M, b
+
+
+def fit_e2_rstar_map(Zt, w_s, u_t, lam=1e3):
+    """R*: supervised probe-aware map, min_M ||w_s^T M h_t + b - u_t||^2 + lam*||M||^2_F.
+
+    Uses labeled target entropy values u_t directly as regression targets.
+    Drops the 1/n_t factor from the data term so alpha_eff = lam/||w_s||^2
+    is n-independent (same reasoning as fit_e2_r0_map).
+    """
+    ws_sq = np.dot(w_s, w_s)
+    mu_t = Zt.mean(0)
+    A = Zt - mu_t
+    mu_u = u_t.mean()
+    t = u_t - mu_u
+
+    d = A.shape[1]
+    a = np.linalg.solve(A.T @ A + (lam / ws_sq) * np.eye(d), A.T @ t)  # (d_t,)
+
+    M = np.outer(a, w_s) / ws_sq             # (d_t, d_s): M @ w_s = a
+    b_scalar = mu_u - mu_t @ a
+    b = b_scalar * w_s / ws_sq
+    return M, b
+
+
 def fit_e2_weights(Zt, Zs, w_s, c_s, init_alpha=1e3, max_iter=500):
     """Directly minimise E2 = f_s(R h_t) - f_s(h_s) via gradient descent.
 
@@ -294,8 +341,8 @@ def zscore(train, full):
     return (full - mu) / sd
 
 
-ALL_CURVES  = {"target_probe", "source_probe", "ridge", "procrustes", "probe_aligned", "e2_minimised", "e2_map"}
-ALL_METRICS = {"auroc", "spearman", "kendall"}
+ALL_CURVES  = {"target_probe", "source_probe", "ridge", "procrustes", "probe_aligned", "e2_minimised", "e2_map", "e2_r0", "e2_rstar"}
+ALL_METRICS = {"auroc", "spearman", "kendall", "error_rate"}
 
 
 def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
@@ -306,7 +353,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
     if unknown:
         raise ValueError(f"Unknown curves/metrics: {unknown}. "
                          f"Valid curves: {ALL_CURVES}, metrics: {ALL_METRICS}")
-    _probe_budget_curves = {"source_probe", "ridge", "procrustes", "probe_aligned", "e2_minimised", "e2_map"}
+    _probe_budget_curves = {"source_probe", "ridge", "procrustes", "probe_aligned", "e2_minimised", "e2_map", "e2_r0", "e2_rstar"}
     _run_probe_budget = bool(curves & _probe_budget_curves)
 
     rng = np.random.default_rng(seed)
@@ -369,6 +416,10 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
         a_e2_full, c_e2_full = fit_e2_weights(Zt[pool], Zs[pool], w_s, c_s, init_alpha=alpha)
     if _run_probe_budget and "e2_map" in curves:
         Me2m_full, be2m_full = fit_e2_map(Zt[pool], Zs[pool], w_s, c_s, lam=_lam_e2)
+    if _run_probe_budget and "e2_r0" in curves:
+        Me2r0_full, be2r0_full = fit_e2_r0_map(Zt[pool], Zs[pool], w_s, lam=_lam_e2)
+    if _run_probe_budget and "e2_rstar" in curves:
+        Me2rs_full, be2rs_full = fit_e2_rstar_map(Zt[pool], w_s, ent_t[pool], lam=_lam_e2)
 
     ent_t_eval = ent_t[eval_idx]
     ent_s_eval = ent_s[eval_idx]
@@ -388,6 +439,8 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
         "probe_aligned": ("curveB_probe_aligned",    "curveB_probe_aligned_src_probe_budget"),
         "e2_minimised":  ("curveB_e2_minimised",     "curveB_e2_src_probe_budget"),
         "e2_map":        ("curveB_e2_map",           "curveB_e2_map_src_probe_budget"),
+        "e2_r0":         ("curveB_e2_r0",            "curveB_e2_r0_src_probe_budget"),
+        "e2_rstar":      ("curveB_e2_rstar",          "curveB_e2_rstar_src_probe_budget"),
     }
 
     results = {"src_layer": int(Ls), "tgt_layer": int(Lt),
@@ -398,12 +451,14 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
     for c in curves:
         mb_key, pb_key = _curve_keys[c]
         results[mb_key] = []
-        if "spearman" in metrics: results[mb_key + "_spearman"] = []
-        if "kendall"  in metrics: results[mb_key + "_kendall"]  = []
+        if "spearman"   in metrics: results[mb_key + "_spearman"]   = []
+        if "kendall"    in metrics: results[mb_key + "_kendall"]    = []
+        if "error_rate" in metrics: results[mb_key + "_error_rate"] = []
         if pb_key and _run_probe_budget:
             results[pb_key] = []
-            if "spearman" in metrics: results[pb_key + "_spearman"] = []
-            if "kendall"  in metrics: results[pb_key + "_kendall"]  = []
+            if "spearman"   in metrics: results[pb_key + "_spearman"]   = []
+            if "kendall"    in metrics: results[pb_key + "_kendall"]    = []
+            if "error_rate" in metrics: results[pb_key + "_error_rate"] = []
 
     def _append(key, val):
         if key in results:
@@ -419,6 +474,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                 _append("curveA_native", None)
                 _append("curveA_native_spearman", None)
                 _append("curveA_native_kendall", None)
+                _append("curveA_native_error_rate", None)
             else:
                 native = LogisticRegression(max_iter=1000).fit(Zt[sub], yt[sub])
                 proba_a = native.predict_proba(Zt_eval)[:, 1]
@@ -427,6 +483,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                 rho_a, tau_a = _rank(ent_t_eval, proba_a)
                 _append("curveA_native_spearman", rho_a)
                 _append("curveA_native_kendall", tau_a)
+                _append("curveA_native_error_rate", float(np.mean(native.predict(Zt_eval) != yt_eval)))
                 print_parts.append(f"A(native)={au_a:.3f}")
 
         # Curve B (map budget): map fit on n UNLABELED pairs, fixed source probe transferred.
@@ -439,6 +496,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             rho_r, tau_r = _rank(ent_t_eval, sc_r)
             _append("curveB_ridge_spearman", rho_r)
             _append("curveB_ridge_kendall", tau_r)
+            _append("curveB_ridge_error_rate", float(np.mean((sc_r > 0).astype(int) != yt_eval)))
             print_parts.append(f"B(ridge)={au_r:.3f}")
 
         if "procrustes" in curves:
@@ -450,6 +508,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             rho_p, tau_p = _rank(ent_t_eval, sc_p)
             _append("curveB_procrustes_spearman", rho_p)
             _append("curveB_procrustes_kendall", tau_p)
+            _append("curveB_procrustes_error_rate", float(np.mean((sc_p > 0).astype(int) != yt_eval)))
             print_parts.append(f"B(procrustes)={au_p:.3f}")
 
         if "probe_aligned" in curves:
@@ -461,6 +520,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             rho_pa, tau_pa = _rank(ent_t_eval, sc_pa)
             _append("curveB_probe_aligned_spearman", rho_pa)
             _append("curveB_probe_aligned_kendall", tau_pa)
+            _append("curveB_probe_aligned_error_rate", float(np.mean((sc_pa > 0).astype(int) != yt_eval)))
             print_parts.append(f"B(probe-aligned)={au_pa:.3f}")
 
         if "e2_minimised" in curves:
@@ -471,6 +531,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             rho_e2, tau_e2 = _rank(ent_t_eval, sc_e2)
             _append("curveB_e2_minimised_spearman", rho_e2)
             _append("curveB_e2_minimised_kendall", tau_e2)
+            _append("curveB_e2_minimised_error_rate", float(np.mean((sc_e2 > 0).astype(int) != yt_eval)))
             print_parts.append(f"B(e2-min)={au_e2:.3f}")
 
         if "e2_map" in curves:
@@ -482,7 +543,32 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             rho_e2m, tau_e2m = _rank(ent_t_eval, sc_e2m)
             _append("curveB_e2_map_spearman", rho_e2m)
             _append("curveB_e2_map_kendall", tau_e2m)
+            _append("curveB_e2_map_error_rate", float(np.mean((sc_e2m > 0).astype(int) != yt_eval)))
             print_parts.append(f"B(e2-map)={au_e2m:.3f}")
+
+        if "e2_r0" in curves:
+            Me2r0, be2r0 = fit_e2_r0_map(Zt[sub], Zs[sub], w_s, lam=_lam_e2)
+            a_te2r0, c_te2r0 = transfer_probe(src_probe, Me2r0, be2r0)
+            sc_e2r0 = probe_scores(Zt_eval, a_te2r0, c_te2r0)
+            au_e2r0 = roc_auc_score(yt_eval, sc_e2r0)
+            _append("curveB_e2_r0", float(au_e2r0))
+            rho_e2r0, tau_e2r0 = _rank(ent_t_eval, sc_e2r0)
+            _append("curveB_e2_r0_spearman", rho_e2r0)
+            _append("curveB_e2_r0_kendall", tau_e2r0)
+            _append("curveB_e2_r0_error_rate", float(np.mean((sc_e2r0 > 0).astype(int) != yt_eval)))
+            print_parts.append(f"B(e2-r0)={au_e2r0:.3f}")
+
+        if "e2_rstar" in curves:
+            Me2rs, be2rs = fit_e2_rstar_map(Zt[sub], w_s, ent_t[sub], lam=_lam_e2)
+            a_te2rs, c_te2rs = transfer_probe(src_probe, Me2rs, be2rs)
+            sc_e2rs = probe_scores(Zt_eval, a_te2rs, c_te2rs)
+            au_e2rs = roc_auc_score(yt_eval, sc_e2rs)
+            _append("curveB_e2_rstar", float(au_e2rs))
+            rho_e2rs, tau_e2rs = _rank(ent_t_eval, sc_e2rs)
+            _append("curveB_e2_rstar_spearman", rho_e2rs)
+            _append("curveB_e2_rstar_kendall", tau_e2rs)
+            _append("curveB_e2_rstar_error_rate", float(np.mean((sc_e2rs > 0).astype(int) != yt_eval)))
+            print_parts.append(f"B(e2-rstar)={au_e2rs:.3f}")
 
         # source_probe (Curve C) + probe-budget variants.
         if _run_probe_budget:
@@ -503,6 +589,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_c, tau_c = _rank(ent_s_eval, sc_c)
                     _append("curveC_source_native_spearman", rho_c)
                     _append("curveC_source_native_kendall", tau_c)
+                    _append("curveC_source_native_error_rate", float(np.mean(src_native.predict(Zs_eval) != ys_eval)))
                     print_parts.append(f"C(src-native)={au_c:.3f}")
 
                 if "ridge" in curves:
@@ -512,6 +599,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_rn, tau_rn = _rank(ent_t_eval, sc_rn)
                     _append("curveB_ridge_src_probe_budget_spearman", rho_rn)
                     _append("curveB_ridge_src_probe_budget_kendall", tau_rn)
+                    _append("curveB_ridge_src_probe_budget_error_rate", float(np.mean((sc_rn > 0).astype(int) != yt_eval)))
 
                 if "procrustes" in curves:
                     a_tp_n, c_tp_n = transfer_probe(src_native, Mp_full, bp_full)
@@ -520,6 +608,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_pn, tau_pn = _rank(ent_t_eval, sc_pn)
                     _append("curveB_procrustes_src_probe_budget_spearman", rho_pn)
                     _append("curveB_procrustes_src_probe_budget_kendall", tau_pn)
+                    _append("curveB_procrustes_src_probe_budget_error_rate", float(np.mean((sc_pn > 0).astype(int) != yt_eval)))
 
                 if "probe_aligned" in curves:
                     Mpa_n, bpa_n = fit_probe_aligned_map(Zt[pool], Zs[pool], w_n, alpha=alpha)
@@ -529,6 +618,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_pan, tau_pan = _rank(ent_t_eval, sc_pan)
                     _append("curveB_probe_aligned_src_probe_budget_spearman", rho_pan)
                     _append("curveB_probe_aligned_src_probe_budget_kendall", tau_pan)
+                    _append("curveB_probe_aligned_src_probe_budget_error_rate", float(np.mean((sc_pan > 0).astype(int) != yt_eval)))
 
                 if "e2_minimised" in curves:
                     a_te2_n, c_te2_n = fit_e2_weights(Zt[pool], Zs[pool], w_n, c_n, init_alpha=alpha)
@@ -537,6 +627,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_e2n, tau_e2n = _rank(ent_t_eval, sc_e2n)
                     _append("curveB_e2_src_probe_budget_spearman", rho_e2n)
                     _append("curveB_e2_src_probe_budget_kendall", tau_e2n)
+                    _append("curveB_e2_src_probe_budget_error_rate", float(np.mean((sc_e2n > 0).astype(int) != yt_eval)))
 
                 if "e2_map" in curves:
                     Me2m_n, be2m_n = fit_e2_map(Zt[pool], Zs[pool], w_n, c_n, lam=_lam_e2)
@@ -546,6 +637,26 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     rho_e2mn, tau_e2mn = _rank(ent_t_eval, sc_e2mn)
                     _append("curveB_e2_map_src_probe_budget_spearman", rho_e2mn)
                     _append("curveB_e2_map_src_probe_budget_kendall", tau_e2mn)
+                    _append("curveB_e2_map_src_probe_budget_error_rate", float(np.mean((sc_e2mn > 0).astype(int) != yt_eval)))
+
+                if "e2_r0" in curves:
+                    Me2r0_n, be2r0_n = fit_e2_r0_map(Zt[pool], Zs[pool], w_n, lam=_lam_e2)
+                    a_te2r0_n, c_te2r0_n = transfer_probe(src_native, Me2r0_n, be2r0_n)
+                    sc_e2r0n = probe_scores(Zt_eval, a_te2r0_n, c_te2r0_n)
+                    _append("curveB_e2_r0_src_probe_budget", float(roc_auc_score(yt_eval, sc_e2r0n)))
+                    rho_e2r0n, tau_e2r0n = _rank(ent_t_eval, sc_e2r0n)
+                    _append("curveB_e2_r0_src_probe_budget_spearman", rho_e2r0n)
+                    _append("curveB_e2_r0_src_probe_budget_kendall", tau_e2r0n)
+                    _append("curveB_e2_r0_src_probe_budget_error_rate", float(np.mean((sc_e2r0n > 0).astype(int) != yt_eval)))
+
+                if "e2_rstar" in curves:
+                    a_te2rs_n, c_te2rs_n = transfer_probe(src_native, Me2rs_full, be2rs_full)
+                    sc_e2rsn = probe_scores(Zt_eval, a_te2rs_n, c_te2rs_n)
+                    _append("curveB_e2_rstar_src_probe_budget", float(roc_auc_score(yt_eval, sc_e2rsn)))
+                    rho_e2rsn, tau_e2rsn = _rank(ent_t_eval, sc_e2rsn)
+                    _append("curveB_e2_rstar_src_probe_budget_spearman", rho_e2rsn)
+                    _append("curveB_e2_rstar_src_probe_budget_kendall", tau_e2rsn)
+                    _append("curveB_e2_rstar_src_probe_budget_error_rate", float(np.mean((sc_e2rsn > 0).astype(int) != yt_eval)))
 
         print("  " + "  ".join(print_parts))
 
@@ -565,6 +676,9 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
         if metric in metrics:
             _plot_ranking(results, token, out_dir, metric=metric, suffix=suffix)
             _plot_probe_budget_ranking(results, token, out_dir, metric=metric, suffix=suffix)
+    if "error_rate" in metrics:
+        _plot_error_rate(results, token, out_dir, suffix=suffix)
+        _plot_probe_budget_error_rate(results, token, out_dir, suffix=suffix)
     print(f"saved transfer results -> {out_dir}")
     return results
 
@@ -592,6 +706,12 @@ def _plot(res, token, out_dir, suffix=""):
     if "curveB_e2_map" in res:
         ax.plot(g, res["curveB_e2_map"], "X--",
                 label="Curve B: transfer (E2-map, unlabeled)")
+    if "curveB_e2_r0" in res:
+        ax.plot(g, res["curveB_e2_r0"], "h--",
+                label="Curve B: transfer (E2-R0, unlabeled)")
+    if "curveB_e2_rstar" in res:
+        ax.plot(g, res["curveB_e2_rstar"], "*--",
+                label="Curve B: transfer (E2-R*, labeled)")
     if res.get("curveC_source_native"):
         c = [v if v is not None else np.nan for v in res["curveC_source_native"]]
         ax.plot(g, c, "v:", color="green", label="Curve C: native source probe (labeled)")
@@ -647,6 +767,14 @@ def _plot_probe_budget(res, token, out_dir, suffix=""):
         b = [v if v is not None else np.nan for v in res["curveB_e2_map_src_probe_budget"]]
         ax.plot(g, b, "X--", color="#2CA02C",
                 label="Curve B: src probe + E2-map -> target")
+    if "curveB_e2_r0_src_probe_budget" in res:
+        b = [v if v is not None else np.nan for v in res["curveB_e2_r0_src_probe_budget"]]
+        ax.plot(g, b, "h--", color="#9467BD",
+                label="Curve B: src probe + E2-R0 -> target")
+    if "curveB_e2_rstar_src_probe_budget" in res:
+        b = [v if v is not None else np.nan for v in res["curveB_e2_rstar_src_probe_budget"]]
+        ax.plot(g, b, "*--", color="#d62728",
+                label="Curve B: src probe + E2-R* -> target")
     if res.get("curveC_source_native"):
         c = [v if v is not None else np.nan for v in res["curveC_source_native"]]
         ax.plot(g, c, "v:", color="green",
@@ -683,6 +811,8 @@ def _plot_ranking(res, token, out_dir, metric="spearman", suffix=""):
         (f"curveB_probe_aligned_{metric}", "D--", "Curve B: transfer (probe-aligned, unlabeled)"),
         (f"curveB_e2_minimised_{metric}", "P--", "Curve B: transfer (E2-minimised, unlabeled)"),
         (f"curveB_e2_map_{metric}", "X--", "Curve B: transfer (E2-map, unlabeled)"),
+        (f"curveB_e2_r0_{metric}", "h--", "Curve B: transfer (E2-R0, unlabeled)"),
+        (f"curveB_e2_rstar_{metric}", "*--", "Curve B: transfer (E2-R*, labeled)"),
     ]:
         if curve in res:
             ax.plot(g, res[curve], marker, label=lbl)
@@ -728,6 +858,10 @@ def _plot_probe_budget_ranking(res, token, out_dir, metric="spearman", suffix=""
          "Curve B: src probe + E2-minimised map -> target"),
         (f"curveB_e2_map_src_probe_budget_{metric}", "X--", "#2CA02C",
          "Curve B: src probe + E2-map -> target"),
+        (f"curveB_e2_r0_src_probe_budget_{metric}", "h--", "#9467BD",
+         "Curve B: src probe + E2-R0 -> target"),
+        (f"curveB_e2_rstar_src_probe_budget_{metric}", "*--", "#d62728",
+         "Curve B: src probe + E2-R* -> target"),
     ]:
         if curve in res:
             b = [v if v is not None else np.nan for v in res[curve]]
@@ -749,6 +883,92 @@ def _plot_probe_budget_ranking(res, token, out_dir, metric="spearman", suffix=""
     plt.savefig(path, format="pdf", dpi=200)
     plt.close()
     print(f"  saved {label} probe-budget curve -> {path}")
+
+
+def _plot_error_rate(res, token, out_dir, suffix=""):
+    """Map-budget plot with Pr(ẑ ≠ z) on the y-axis."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    g = res["n_grid"]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if "curveA_native_error_rate" in res:
+        a = [v if v is not None else np.nan for v in res["curveA_native_error_rate"]]
+        ax.plot(g, a, "o-", label="Curve A: native target probe (labeled)")
+    for curve, marker, lbl in [
+        ("curveB_ridge_error_rate",         "s--", "Curve B: transfer (ridge, unlabeled)"),
+        ("curveB_procrustes_error_rate",     "^--", "Curve B: transfer (Procrustes, unlabeled)"),
+        ("curveB_probe_aligned_error_rate",  "D--", "Curve B: transfer (probe-aligned, unlabeled)"),
+        ("curveB_e2_minimised_error_rate",   "P--", "Curve B: transfer (E2-minimised, unlabeled)"),
+        ("curveB_e2_map_error_rate",         "X--", "Curve B: transfer (E2-map, unlabeled)"),
+        ("curveB_e2_r0_error_rate",          "h--", "Curve B: transfer (E2-R0, unlabeled)"),
+        ("curveB_e2_rstar_error_rate",        "*--", "Curve B: transfer (E2-R*, labeled)"),
+    ]:
+        if curve in res:
+            ax.plot(g, res[curve], marker, label=lbl)
+    if "curveC_source_native_error_rate" in res:
+        c = [v if v is not None else np.nan for v in res["curveC_source_native_error_rate"]]
+        ax.plot(g, c, "v:", color="green", label="Curve C: native source probe (labeled)")
+    ax.set_xscale("log")
+    ax.set_xlabel("target examples used (labeled for A, unlabeled for B)")
+    ax.set_ylabel("error rate  Pr(ẑ ≠ z)")
+    alpha_txt = f", α={res.get('alpha', 1e3):.0e}" if res.get("alpha", 1e3) != 1e3 else ""
+    ax.set_title(f"Cross-scale SE probe transfer — error rate ({token.upper()}{alpha_txt})")
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.legend()
+    plt.tight_layout()
+    path = os.path.join(out_dir, f"transfer_{token}{suffix}_error_rate.pdf")
+    plt.savefig(path, format="pdf", dpi=200)
+    plt.close()
+    print(f"  saved error-rate curve -> {path}")
+
+
+def _plot_probe_budget_error_rate(res, token, out_dir, suffix=""):
+    """Probe-budget plot with Pr(ẑ ≠ z) on the y-axis."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    g = res["n_grid"]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    if "curveA_native_error_rate" in res:
+        a = [v if v is not None else np.nan for v in res["curveA_native_error_rate"]]
+        ax.plot(g, a, "o-", color="#333333",
+                label="Curve A: native target probe (n labeled target examples)")
+    for curve, marker, color, lbl in [
+        ("curveB_ridge_src_probe_budget_error_rate",        "s--", "#4C72B0",
+         "Curve B: src probe + ridge map -> target"),
+        ("curveB_procrustes_src_probe_budget_error_rate",   "^--", "#DD8452",
+         "Curve B: src probe + Procrustes map -> target"),
+        ("curveB_probe_aligned_src_probe_budget_error_rate","D--", "#8172B2",
+         "Curve B: src probe + probe-aligned map -> target"),
+        ("curveB_e2_src_probe_budget_error_rate",           "P--", "#C44E52",
+         "Curve B: src probe + E2-minimised map -> target"),
+        ("curveB_e2_map_src_probe_budget_error_rate",       "X--", "#2CA02C",
+         "Curve B: src probe + E2-map -> target"),
+        ("curveB_e2_r0_src_probe_budget_error_rate",        "h--", "#9467BD",
+         "Curve B: src probe + E2-R0 -> target"),
+        ("curveB_e2_rstar_src_probe_budget_error_rate",     "*--", "#d62728",
+         "Curve B: src probe + E2-R* -> target"),
+    ]:
+        if curve in res:
+            b = [v if v is not None else np.nan for v in res[curve]]
+            ax.plot(g, b, marker, color=color, label=lbl)
+    if "curveC_source_native_error_rate" in res:
+        c = [v if v is not None else np.nan for v in res["curveC_source_native_error_rate"]]
+        ax.plot(g, c, "v:", color="green",
+                label="Curve C: native source probe (n labeled source examples)")
+    ax.set_xscale("log")
+    ax.set_xlabel("labeled examples used to train the probe")
+    ax.set_ylabel("error rate  Pr(ẑ ≠ z)")
+    alpha_txt = f", α={res.get('alpha', 1e3):.0e}" if res.get("alpha", 1e3) != 1e3 else ""
+    ax.set_title(f"SE probe transfer — probe budget — error rate ({token.upper()}{alpha_txt})")
+    ax.grid(True, linestyle="--", linewidth=0.5)
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    path = os.path.join(out_dir, f"transfer_{token}{suffix}_probe_budget_error_rate.pdf")
+    plt.savefig(path, format="pdf", dpi=200)
+    plt.close()
+    print(f"  saved error-rate probe-budget curve -> {path}")
 
 
 def main():

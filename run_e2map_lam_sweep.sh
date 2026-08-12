@@ -49,7 +49,7 @@ for lam in 0.01 0.1 1.0 10.0 100.0; do
             --token slt --lam-e2-map "$lam" \
             --n-eval 500 --n-grid 50 100 200 400 800 1500 \
             --curves e2_map \
-            --metrics auroc \
+            --metrics auroc error_rate \
             --out-suffix "_lam${lam}_e2m" \
             --out-dir "$OUT_DIR/${NAMES[$i]}"
     done

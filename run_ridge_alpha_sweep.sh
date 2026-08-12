@@ -49,7 +49,7 @@ for alpha in 1e1 1e2 1e3 1e4 1e5; do
             --token slt --alpha "$alpha" \
             --n-eval 500 --n-grid 50 100 200 400 800 1500 \
             --curves ridge \
-            --metrics auroc \
+            --metrics auroc error_rate \
             --out-suffix "_rdg" \
             --out-dir "$OUT_DIR/${NAMES[$i]}"
     done
