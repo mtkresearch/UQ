@@ -346,7 +346,7 @@ ALL_METRICS = {"auroc", "spearman", "kendall", "error_rate"}
 
 
 def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
-        lam_e2_map=None, curves=None, metrics=None, out_suffix=""):
+        lam_e2_map=None, curves=None, metrics=None, out_suffix="", save_venn=False):
     curves  = set(curves)  if curves  is not None else set(ALL_CURVES)
     metrics = set(metrics) if metrics is not None else set(ALL_METRICS)
     unknown = (curves - ALL_CURVES) | (metrics - ALL_METRICS)
@@ -430,6 +430,49 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
         tau, _ = kendalltau(true_ent, scores)
         return float(rho), float(tau)
 
+    # ---- Venn error-overlap bookkeeping (aggregate counts only) ------------ #
+    # Per eval example, three binary events decompose the transferred probe's
+    # error on the target:
+    #   A = source probe disagrees with the source label   (source probe error)
+    #   B = transfer flips the prediction vs the source probe
+    #   C = source and target SE labels disagree           (label mismatch)
+    #   D = transferred probe disagrees with the target label
+    # Over GF(2), D = A xor B xor C exactly, i.e. D = A_only+B_only+C_only+ABC,
+    # which is asserted below as a consistency check on the bookkeeping.
+    venn = {"n_grid": grid, "n_eval": int(len(eval_idx)),
+            "alpha": float(alpha), "lam_e2_map": float(_lam_e2),
+            "label_mismatch": int((ys_eval != yt_eval).sum()),
+            "total": int(len(ys_eval)),
+            "map_budget": {}, "probe_budget": {},
+            "tgt_probe_error": {}} if save_venn else None
+    C_mask = ys_eval != yt_eval
+    src_pred_full = src_probe.predict(Zs_eval) if save_venn else None
+
+    def _venn(aligner, axis, n, src_pred, scores):
+        """Record the 7 region counts for one (aligner, budget axis, n)."""
+        if venn is None:
+            return
+        pred = (scores > 0).astype(int)
+        A = src_pred != ys_eval
+        B = pred != src_pred
+        C = C_mask
+        entry = {
+            "A_only":  int(( A & ~B & ~C).sum()),
+            "B_only":  int((~A &  B & ~C).sum()),
+            "C_only":  int((~A & ~B &  C).sum()),
+            "AB_only": int(( A &  B & ~C).sum()),
+            "AC_only": int(( A & ~B &  C).sum()),
+            "BC_only": int((~A &  B &  C).sum()),
+            "ABC":     int(( A &  B &  C).sum()),
+            "D":       int((pred != yt_eval).sum()),
+            "total":   int(len(ys_eval)),
+        }
+        d_id = entry["A_only"] + entry["B_only"] + entry["C_only"] + entry["ABC"]
+        assert d_id == entry["D"], (
+            f"{aligner}/{axis}/n={n}: D identity failed: {d_id} != {entry['D']}"
+        )
+        venn[axis].setdefault(aligner, {})[str(n)] = entry
+
     # Map from curve name -> (map-budget key, probe-budget key)
     _curve_keys = {
         "target_probe":  ("curveA_native",         None),
@@ -484,6 +527,8 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                 _append("curveA_native_spearman", rho_a)
                 _append("curveA_native_kendall", tau_a)
                 _append("curveA_native_error_rate", float(np.mean(native.predict(Zt_eval) != yt_eval)))
+                if venn is not None:
+                    venn["tgt_probe_error"][str(n)] = int((native.predict(Zt_eval) != yt_eval).sum())
                 print_parts.append(f"A(native)={au_a:.3f}")
 
         # Curve B (map budget): map fit on n UNLABELED pairs, fixed source probe transferred.
@@ -497,6 +542,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_ridge_spearman", rho_r)
             _append("curveB_ridge_kendall", tau_r)
             _append("curveB_ridge_error_rate", float(np.mean((sc_r > 0).astype(int) != yt_eval)))
+            _venn("ridge", "map_budget", n, src_pred_full, sc_r)
             print_parts.append(f"B(ridge)={au_r:.3f}")
 
         if "procrustes" in curves:
@@ -509,6 +555,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_procrustes_spearman", rho_p)
             _append("curveB_procrustes_kendall", tau_p)
             _append("curveB_procrustes_error_rate", float(np.mean((sc_p > 0).astype(int) != yt_eval)))
+            _venn("procrustes", "map_budget", n, src_pred_full, sc_p)
             print_parts.append(f"B(procrustes)={au_p:.3f}")
 
         if "probe_aligned" in curves:
@@ -521,6 +568,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_probe_aligned_spearman", rho_pa)
             _append("curveB_probe_aligned_kendall", tau_pa)
             _append("curveB_probe_aligned_error_rate", float(np.mean((sc_pa > 0).astype(int) != yt_eval)))
+            _venn("probe_aligned", "map_budget", n, src_pred_full, sc_pa)
             print_parts.append(f"B(probe-aligned)={au_pa:.3f}")
 
         if "e2_minimised" in curves:
@@ -532,6 +580,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_e2_minimised_spearman", rho_e2)
             _append("curveB_e2_minimised_kendall", tau_e2)
             _append("curveB_e2_minimised_error_rate", float(np.mean((sc_e2 > 0).astype(int) != yt_eval)))
+            _venn("e2_minimised", "map_budget", n, src_pred_full, sc_e2)
             print_parts.append(f"B(e2-min)={au_e2:.3f}")
 
         if "e2_map" in curves:
@@ -544,6 +593,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_e2_map_spearman", rho_e2m)
             _append("curveB_e2_map_kendall", tau_e2m)
             _append("curveB_e2_map_error_rate", float(np.mean((sc_e2m > 0).astype(int) != yt_eval)))
+            _venn("e2_map", "map_budget", n, src_pred_full, sc_e2m)
             print_parts.append(f"B(e2-map)={au_e2m:.3f}")
 
         if "e2_r0" in curves:
@@ -556,6 +606,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_e2_r0_spearman", rho_e2r0)
             _append("curveB_e2_r0_kendall", tau_e2r0)
             _append("curveB_e2_r0_error_rate", float(np.mean((sc_e2r0 > 0).astype(int) != yt_eval)))
+            _venn("e2_r0", "map_budget", n, src_pred_full, sc_e2r0)
             print_parts.append(f"B(e2-r0)={au_e2r0:.3f}")
 
         if "e2_rstar" in curves:
@@ -568,6 +619,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
             _append("curveB_e2_rstar_spearman", rho_e2rs)
             _append("curveB_e2_rstar_kendall", tau_e2rs)
             _append("curveB_e2_rstar_error_rate", float(np.mean((sc_e2rs > 0).astype(int) != yt_eval)))
+            _venn("e2_rstar", "map_budget", n, src_pred_full, sc_e2rs)
             print_parts.append(f"B(e2-rstar)={au_e2rs:.3f}")
 
         # source_probe (Curve C) + probe-budget variants.
@@ -581,6 +633,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                 src_native = LogisticRegression(max_iter=1000).fit(Zs[sub], ys[sub])
                 w_n = src_native.coef_.ravel()
                 c_n = float(src_native.intercept_[0])
+                src_pred_n = src_native.predict(Zs_eval) if venn is not None else None
 
                 if "source_probe" in curves:
                     sc_c = src_native.predict_proba(Zs_eval)[:, 1]
@@ -600,6 +653,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_ridge_src_probe_budget_spearman", rho_rn)
                     _append("curveB_ridge_src_probe_budget_kendall", tau_rn)
                     _append("curveB_ridge_src_probe_budget_error_rate", float(np.mean((sc_rn > 0).astype(int) != yt_eval)))
+                    _venn("ridge", "probe_budget", n, src_pred_n, sc_rn)
 
                 if "procrustes" in curves:
                     a_tp_n, c_tp_n = transfer_probe(src_native, Mp_full, bp_full)
@@ -609,6 +663,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_procrustes_src_probe_budget_spearman", rho_pn)
                     _append("curveB_procrustes_src_probe_budget_kendall", tau_pn)
                     _append("curveB_procrustes_src_probe_budget_error_rate", float(np.mean((sc_pn > 0).astype(int) != yt_eval)))
+                    _venn("procrustes", "probe_budget", n, src_pred_n, sc_pn)
 
                 if "probe_aligned" in curves:
                     Mpa_n, bpa_n = fit_probe_aligned_map(Zt[pool], Zs[pool], w_n, alpha=alpha)
@@ -619,6 +674,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_probe_aligned_src_probe_budget_spearman", rho_pan)
                     _append("curveB_probe_aligned_src_probe_budget_kendall", tau_pan)
                     _append("curveB_probe_aligned_src_probe_budget_error_rate", float(np.mean((sc_pan > 0).astype(int) != yt_eval)))
+                    _venn("probe_aligned", "probe_budget", n, src_pred_n, sc_pan)
 
                 if "e2_minimised" in curves:
                     a_te2_n, c_te2_n = fit_e2_weights(Zt[pool], Zs[pool], w_n, c_n, init_alpha=alpha)
@@ -628,6 +684,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_e2_src_probe_budget_spearman", rho_e2n)
                     _append("curveB_e2_src_probe_budget_kendall", tau_e2n)
                     _append("curveB_e2_src_probe_budget_error_rate", float(np.mean((sc_e2n > 0).astype(int) != yt_eval)))
+                    _venn("e2_minimised", "probe_budget", n, src_pred_n, sc_e2n)
 
                 if "e2_map" in curves:
                     Me2m_n, be2m_n = fit_e2_map(Zt[pool], Zs[pool], w_n, c_n, lam=_lam_e2)
@@ -638,6 +695,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_e2_map_src_probe_budget_spearman", rho_e2mn)
                     _append("curveB_e2_map_src_probe_budget_kendall", tau_e2mn)
                     _append("curveB_e2_map_src_probe_budget_error_rate", float(np.mean((sc_e2mn > 0).astype(int) != yt_eval)))
+                    _venn("e2_map", "probe_budget", n, src_pred_n, sc_e2mn)
 
                 if "e2_r0" in curves:
                     Me2r0_n, be2r0_n = fit_e2_r0_map(Zt[pool], Zs[pool], w_n, lam=_lam_e2)
@@ -648,6 +706,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_e2_r0_src_probe_budget_spearman", rho_e2r0n)
                     _append("curveB_e2_r0_src_probe_budget_kendall", tau_e2r0n)
                     _append("curveB_e2_r0_src_probe_budget_error_rate", float(np.mean((sc_e2r0n > 0).astype(int) != yt_eval)))
+                    _venn("e2_r0", "probe_budget", n, src_pred_n, sc_e2r0n)
 
                 if "e2_rstar" in curves:
                     a_te2rs_n, c_te2rs_n = transfer_probe(src_native, Me2rs_full, be2rs_full)
@@ -657,6 +716,7 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _append("curveB_e2_rstar_src_probe_budget_spearman", rho_e2rsn)
                     _append("curveB_e2_rstar_src_probe_budget_kendall", tau_e2rsn)
                     _append("curveB_e2_rstar_src_probe_budget_error_rate", float(np.mean((sc_e2rsn > 0).astype(int) != yt_eval)))
+                    _venn("e2_rstar", "probe_budget", n, src_pred_n, sc_e2rsn)
 
         print("  " + "  ".join(print_parts))
 
@@ -669,6 +729,13 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
     suffix += out_suffix
     with open(os.path.join(out_dir, f"transfer_{token}{suffix}.json"), "w") as f:
         json.dump(results, f, indent=2)
+    if venn is not None:
+        # Separate file: keeps the transfer_*.json artifact byte-identical to runs
+        # without --save-venn, so existing plotters/diffs are unaffected.
+        venn_path = os.path.join(out_dir, f"venn_{token}{suffix}.json")
+        with open(venn_path, "w") as f:
+            json.dump(venn, f, indent=2)
+        print(f"saved venn counts -> {venn_path}")
     if "auroc" in metrics:
         _plot(results, token, out_dir, suffix=suffix)
         _plot_probe_budget(results, token, out_dir, suffix=suffix)
@@ -995,11 +1062,15 @@ def main():
                         f"choices: {sorted(ALL_METRICS)}")
     p.add_argument("--out-suffix", default="",
                    help="extra string appended to output filenames (e.g. _v2)")
+    p.add_argument("--save-venn", action="store_true",
+                   help="also write venn_<token><suffix>.json with the A/B/C/D "
+                        "error-overlap counts per aligner, budget axis and n "
+                        "(plot with sep.transfer.plot_venn)")
     args = apply_yaml_config(p)
     run(args.source_gen, args.target_gen, args.token, args.out_dir,
         args.n_eval, args.n_grid, args.seed, alpha=args.alpha,
         lam_e2_map=args.lam_e2_map, curves=args.curves, metrics=args.metrics,
-        out_suffix=args.out_suffix)
+        out_suffix=args.out_suffix, save_venn=args.save_venn)
 
 
 if __name__ == "__main__":
