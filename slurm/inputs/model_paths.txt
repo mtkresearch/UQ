@@ -1,0 +1,28 @@
+# dataset  model  validation_generations.pkl path
+# Format: <dataset>  <model>  <path>
+
+# --- Squad ---
+squad  llama-2-7b      /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/llama-2-7b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_204934-kfg0707t/files/validation_generations.pkl
+squad  mistral-7b      /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/mistral-7b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_214205-yt39j5xm/files/validation_generations.pkl
+squad  llama-3.2-1b    /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/llama-3.2-1b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_204934-2kh3uhaq/files/validation_generations.pkl
+squad  llama-3.1-8b    /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/llama-3.1-8b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_204934-iemflrsb/files/validation_generations.pkl
+squad  qwen3-8b        /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/qwen3-8b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_221436-wpcuwd1h/files/validation_generations.pkl
+squad  phi-4           /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/phi-4/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_011820-4ho6isi4/files/validation_generations.pkl
+squad  gemma-4-12b     /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/gemma-4-12b/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_233357-611oqsg9/files/validation_generations.pkl
+squad  mistral-nemo    /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/mistral-nemo/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_233357-u5ftosss/files/validation_generations.pkl
+
+# --- TriviaQA ---
+trivia_qa  llama-2-7b      /build_bak/UQ_project/shared_runs/llama-2-7b_trivia_qa_offline-run-20260722_024333-iqr1e2n3/files/validation_generations.pkl
+trivia_qa  mistral-7b      /build_bak/UQ_project/shared_runs/mistral-7b-v0.1_trivia_qa_offline-run-20260722_025324-kg7388qq/files/validation_generations.pkl
+trivia_qa  llama-3.2-1b    /build_bak/UQ_project/shared_runs/llama-3.2-1b_trivia_qa_offline-run-20260722_015442-btlshgnk/files/validation_generations.pkl
+trivia_qa  llama-3.1-8b    /build_bak/UQ_project/shared_runs/llama-3.1-8b_trivia_qa_offline-run-20260722_022939-d3vgvho3/files/validation_generations.pkl
+
+# --- NQ ---
+nq  llama-2-7b      /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/llama-2-7b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_030812-ywwuqhs4/files/validation_generations.pkl
+nq  mistral-7b      /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/mistral-7b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_035751-9pib3jl5/files/validation_generations.pkl
+nq  llama-3.2-1b    /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/llama-3.2-1b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_030809-6tiwcjgy/files/validation_generations.pkl
+nq  llama-3.1-8b    /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/llama-3.1-8b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_030809-b6p5avs1/files/validation_generations.pkl
+nq  qwen3-8b        /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/qwen3-8b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_042641-pbl4x2wk/files/validation_generations.pkl
+nq  phi-4           /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/phi-4/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_073914-6stzhhpn/files/validation_generations.pkl
+nq  gemma-4-12b     /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/gemma-4-12b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_054641-3malc07q/files/validation_generations.pkl
+nq  mistral-nemo    /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/mistral-nemo/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_054641-5q62o7yr/files/validation_generations.pkl

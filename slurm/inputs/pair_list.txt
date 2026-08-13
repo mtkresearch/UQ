@@ -1,0 +1,37 @@
+# Transfer experiment model pairs.
+# Format: <src_model>  <tgt_model>
+#
+# Paths and datasets are resolved at runtime via --model-paths and --datasets.
+# Use --cross-align-dataset eval_ds:align_ds to add cross-alignment pairs.
+#
+# Example invocation:
+#   python -m sep.transfer.transfer2 align_cache \
+#       --out-dir $OUT --pair-list slurm/inputs/pair_list.txt \
+#       --model-paths slurm/inputs/model_paths.txt \
+#       --datasets squad nq \
+#       --cross-align-dataset squad:nq nq:squad
+
+# --- cross-scale ---
+llama-3.2-1b  llama-3.1-8b
+
+# --- 5-model all-pairs (llama3.1-8b, qwen3-8b, phi-4, gemma-4-12b, mistral-nemo) ---
+llama-3.1-8b  qwen3-8b
+llama-3.1-8b  phi-4
+llama-3.1-8b  gemma-4-12b
+llama-3.1-8b  mistral-nemo
+qwen3-8b      llama-3.1-8b
+qwen3-8b      phi-4
+qwen3-8b      gemma-4-12b
+qwen3-8b      mistral-nemo
+phi-4         llama-3.1-8b
+phi-4         qwen3-8b
+phi-4         gemma-4-12b
+phi-4         mistral-nemo
+gemma-4-12b   llama-3.1-8b
+gemma-4-12b   qwen3-8b
+gemma-4-12b   phi-4
+gemma-4-12b   mistral-nemo
+mistral-nemo  llama-3.1-8b
+mistral-nemo  qwen3-8b
+mistral-nemo  phi-4
+mistral-nemo  gemma-4-12b
