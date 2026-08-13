@@ -21,6 +21,7 @@ dependencies = [
     "numpy>=1.26",
     "pandas>=2.0",
     "matplotlib>=3.8",
+    "matplotlib-venn>=1.1",
     "tqdm",
     "tenacity",
     "bitsandbytes; platform_system == 'Linux'",
