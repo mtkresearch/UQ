@@ -12,10 +12,12 @@ squad  gemma-4-12b     /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_202607
 squad  mistral-nemo    /proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926/mistral-nemo/gpu_mtk53728/uncertainty/wandb/offline-run-20260723_233357-u5ftosss/files/validation_generations.pkl
 
 # --- TriviaQA ---
-trivia_qa  llama-2-7b      /build_bak/UQ_project/shared_runs/llama-2-7b_trivia_qa_offline-run-20260722_024333-iqr1e2n3/files/validation_generations.pkl
-trivia_qa  mistral-7b      /build_bak/UQ_project/shared_runs/mistral-7b-v0.1_trivia_qa_offline-run-20260722_025324-kg7388qq/files/validation_generations.pkl
-trivia_qa  llama-3.2-1b    /build_bak/UQ_project/shared_runs/llama-3.2-1b_trivia_qa_offline-run-20260722_015442-btlshgnk/files/validation_generations.pkl
-trivia_qa  llama-3.1-8b    /build_bak/UQ_project/shared_runs/llama-3.1-8b_trivia_qa_offline-run-20260722_022939-d3vgvho3/files/validation_generations.pkl
+trivia_qa  llama-3.2-1b    /build_bak/UQ_project/sep_scratch/llama-3.2-1b/20260727_232644/shards/merged/gpu_mtk53658/uncertainty/wandb/offline-run-20260727_233553-derway32/files/validation_generations.pkl
+trivia_qa  llama-3.1-8b    /build_bak/UQ_project/sep_scratch/llama-3.1-8b/20260722_183618/merged/gpu_mtk53686/uncertainty/wandb/offline-run-20260722_212914-3na5fqgj/files/validation_generations.pkl
+trivia_qa  qwen3-8b        /build_bak/UQ_project/sep_scratch/qwen3-8b/20260722_225812/shards/merged/gpu_mtk53686/uncertainty/wandb/offline-run-20260722_230742-72ju7z96/files/validation_generations.pkl
+trivia_qa  phi-4           /build_bak/UQ_project/sep_scratch/phi-4/20260722_202423/merged/gpu_mtk53686/uncertainty/wandb/offline-run-20260722_212315-r9j3f3bx/files/validation_generations.pkl
+trivia_qa  gemma-4-12b     /build_bak/UQ_project/sep_scratch/gemma-4-12b/20260722_195243/merged/gpu_mtk53686/uncertainty/wandb/offline-run-20260722_202149-26xjcjwe/files/validation_generations.pkl
+trivia_qa  mistral-nemo    /build_bak/UQ_project/sep_scratch/mistral-nemo/20260722_201421/shards/merged/gpu_mtk53686/uncertainty/wandb/offline-run-20260722_203045-84l9fd2d/files/validation_generations.pkl
 
 # --- NQ ---
 nq  llama-2-7b      /proj/MR_dataset/mtk53728/UQ/sep_scratch/nq_all_20260724_030801/llama-2-7b/gpu_mtk53728/uncertainty/wandb/offline-run-20260724_030812-ywwuqhs4/files/validation_generations.pkl

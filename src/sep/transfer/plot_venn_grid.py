@@ -216,7 +216,7 @@ def plot_venn_fig(eval_ds, align_ds, n, results_dir, aligner_suffix):
     return fig
 
 
-def make_table(eval_ds, results_dir, aligner_suffix, out_path):
+def make_table(eval_ds, results_dir, aligner_suffix, out_path, datasets=("nq", "squad")):
     """Write a CSV with one row per (pair, align_ds, n)."""
     fields = ["pair", "eval_ds", "align_ds", "n",
               "A_only", "B_only", "C_only", "AB_only", "AC_only", "BC_only",
@@ -231,7 +231,7 @@ def make_table(eval_ds, results_dir, aligner_suffix, out_path):
 
     for pair in pairs:
         pair_dir = os.path.join(ds_dir, pair)
-        for align_ds in ("nq", "squad"):
+        for align_ds in datasets:
             venn_path = os.path.join(pair_dir, f"venn_align_{align_ds}_{aligner_suffix}.json")
             if not os.path.exists(venn_path):
                 continue
@@ -256,7 +256,7 @@ def make_table(eval_ds, results_dir, aligner_suffix, out_path):
 
 
 def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
-              verbose=True):
+              datasets=("nq", "squad"), verbose=True):
     """Write the 24 venn figures + 2 tables for ONE aligner+hyperparam combo.
 
     Outputs go to <out_dir>/summary_plots/venn_<aligner_suffix>/.
@@ -271,9 +271,9 @@ def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
     os.makedirs(plots_dir, exist_ok=True)
     written = []
 
-    # ── figures: 2 eval_ds × 2 align_ds × len(n_values) ─────────────────────
-    for eval_ds in ("nq", "squad"):
-        for align_ds in ("nq", "squad"):
+    # ── figures: eval_ds × align_ds × len(n_values) ──────────────────────────
+    for eval_ds in datasets:
+        for align_ds in datasets:
             for n in n_values:
                 fig = plot_venn_fig(eval_ds, align_ds, n, results_dir, aligner_suffix)
                 path = os.path.join(plots_dir,
@@ -284,10 +284,10 @@ def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
                 if verbose:
                     print(f"Saved: {path}")
 
-    # ── tables: 2 eval_ds ────────────────────────────────────────────────────
-    for eval_ds in ("nq", "squad"):
+    # ── tables: one per eval_ds ───────────────────────────────────────────────
+    for eval_ds in datasets:
         csv_path = os.path.join(plots_dir, f"table_{eval_ds}_{aligner_suffix}.csv")
-        make_table(eval_ds, results_dir, aligner_suffix, csv_path)
+        make_table(eval_ds, results_dir, aligner_suffix, csv_path, datasets=datasets)
         written.append(csv_path)
 
     return written

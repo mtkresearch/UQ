@@ -114,22 +114,25 @@ def process_pair(pair_dir, eval_ds, results, aligner_suffix=None, verbose=True):
 
     for fname in align_files:
         # filename: predictions_align_<align_ds>_<aligner_suffix>.json
-        stem        = fname[len("predictions_align_"):-len(".json")]
-        # stem = e.g. "nq_ridge_a1e3" or "squad_ridge_a1e3"
-        parts       = stem.split("_", 1)   # ["nq", "ridge_a1e3"]
-        align_ds    = parts[0]
-        aligner_suffix = parts[1] if len(parts) > 1 else "unknown"
+        stem = fname[len("predictions_align_"):-len(".json")]
+        # Use the known aligner_suffix parameter to correctly split off align_ds,
+        # handling dataset names that contain underscores (e.g. "trivia_qa").
+        if aligner_suffix is not None and stem.endswith(f"_{aligner_suffix}"):
+            file_align_ds  = stem[:-len(f"_{aligner_suffix}")]
+            file_suffix    = aligner_suffix
+        else:
+            parts          = stem.split("_", 1)
+            file_align_ds  = parts[0]
+            file_suffix    = parts[1] if len(parts) > 1 else "unknown"
 
-        # derive aligner name (first token of suffix before "_a...")
-        aligner = aligner_suffix.split("_")[0]
+        aligner = file_suffix.split("_")[0]
 
         align_preds = _load_json(os.path.join(pair_dir, fname))
-        n_grid = native_preds.get("by_n")
         n_grid_list = [int(k) for k in sorted(align_preds["by_n"].keys(), key=int)]
 
         venn = compute_venn(native_preds, align_preds, n_grid_list, aligner=aligner)
 
-        out_path = os.path.join(pair_dir, f"venn_align_{align_ds}_{aligner_suffix}.json")
+        out_path = os.path.join(pair_dir, f"venn_align_{file_align_ds}_{file_suffix}.json")
         _save_json(out_path, venn)
         results.append(out_path)
         if verbose:

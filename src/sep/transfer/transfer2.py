@@ -66,8 +66,8 @@ def _model_tag(path):
 
 
 _TOKEN_KEY = {
-    "slt": "emb_last_tok_before_gen",
-    "tbg": "emb_tok_before_eos",
+    "slt": "emb_tok_before_eos",
+    "tbg": "emb_last_tok_before_gen",
 }
 
 def _load_hidden(gen_path, token="slt"):
@@ -85,6 +85,25 @@ def _load_hidden(gen_path, token="slt"):
         tensors.append(t[:, 0, :].float().numpy())  # (n_layers, d)
     H = np.stack(tensors, axis=1).astype(np.float32)  # (n_layers, N, d)
     return H, ids
+
+
+def _align_ids(ids_s, ids_t):
+    """Return index array such that H_tgt[:, order] rows match H_src rows by ID.
+
+    Multi-GPU sharding can merge shards in completion order, scrambling the row
+    order without changing the example-id set.  Reordering fixes this silently.
+    Hard-fails if the id sets genuinely differ (different runs / examples).
+    """
+    if ids_s == ids_t:
+        return np.arange(len(ids_s))
+    set_s, set_t = set(ids_s), set(ids_t)
+    if set_s != set_t:
+        raise ValueError(
+            f"example-id SETS differ: {len(set_s & set_t)} shared, "
+            f"{len(set_s - set_t)} only in source, {len(set_t - set_s)} only in "
+            f"target -- runs are not on the same examples, cannot transfer.")
+    pos = {k: i for i, k in enumerate(ids_t)}
+    return np.array([pos[k] for k in ids_s], dtype=int)
 
 
 def _load_entropy(gen_path):
@@ -234,20 +253,18 @@ def phase_probe_cache(args):
     for ds in args.datasets:
         if ds not in model_path_map:
             raise ValueError(f"No entries for dataset '{ds}' in {args.model_paths}")
-        for path in model_path_map[ds].values():
-            entries.append(path)
+        for model, path in model_path_map[ds].items():
+            entries.append((ds, model, path))
 
     timing = _load_timing(args.out_dir)
 
-    for gen_path in entries:
-        ds = _dataset_tag(gen_path)
-        model = _model_tag(gen_path)
+    for ds, model, gen_path in entries:
         out_path = os.path.join(args.out_dir, "probes", ds, f"{model}.pkl")
         if os.path.exists(out_path) and not args.force:
-            print(f"[probe_cache] skip {model}/{ds} (exists)")
+            print(f"[probe_cache] skip {ds}/{model} (exists)")
             continue
 
-        print(f"\n[probe_cache] {model} / {ds}")
+        print(f"\n[probe_cache] {ds} / {model}")
         print(f"  hidden states: {gen_path}")
 
         H, ids = _load_hidden(gen_path, token)
@@ -404,7 +421,7 @@ def _resolve_pairs(args):
                 raise ValueError(f"no path registered for ({dataset}, {tgt_model}) in model_paths.txt")
                 continue
             # same-align pair
-            pairs.append((src_path, tgt_path, dataset, dataset))
+            pairs.append((src_model, src_path, tgt_model, tgt_path, dataset, dataset))
             # cross-align pairs
             for eval_ds, align_ds in cross_map:
                 if eval_ds != dataset:
@@ -415,7 +432,7 @@ def _resolve_pairs(args):
                     raise ValueError(f"no path registered for ({align_ds}, {src_model}) in model_paths.txt")
                 if align_tgt is None:
                     raise ValueError(f"no path registered for ({align_ds}, {tgt_model}) in model_paths.txt")
-                pairs.append((src_path, tgt_path, dataset, align_ds))
+                pairs.append((src_model, src_path, tgt_model, tgt_path, dataset, align_ds))
     return pairs
 
 
@@ -436,9 +453,7 @@ def phase_align_cache(args):
 
     pairs = _resolve_pairs(args)
 
-    for src_gen, tgt_gen, eval_ds, align_ds in pairs:
-        src_model = _model_tag(src_gen)
-        tgt_model = _model_tag(tgt_gen)
+    for src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds in pairs:
         pair_name = f"{src_model}_to_{tgt_model}"
         # one sub-directory per pair, one file per aligner+hyperparam combo
         pair_align_dir = os.path.join(args.out_dir, "alignments", eval_ds, pair_name)
@@ -497,16 +512,21 @@ def phase_align_cache(args):
 
         # Load raw hidden states for alignment dataset at the best layers
         print(f"  loading align hidden states ({align_ds})")
-        H_src_align, _ = _load_hidden(src_align_cache["gen_path"], token)
-        H_tgt_align, _ = _load_hidden(tgt_align_cache["gen_path"], token)
+        H_src_align, ids_src_align = _load_hidden(src_align_cache["gen_path"], token)
+        H_tgt_align, ids_tgt_align = _load_hidden(tgt_align_cache["gen_path"], token)
+        order_align = _align_ids(ids_src_align, ids_tgt_align)
+        H_tgt_align = H_tgt_align[:, order_align]
 
         Xs_align = H_src_align[Ls].astype(np.float64)
         Xt_align = H_tgt_align[Lt].astype(np.float64)
 
-        # Z-score using alignment dataset's own statistics
+        # Z-score using pool stats from probe cache (same 1500-example stats used
+        # in Phase 3 evaluation) so M is fit and applied in the same coordinate system.
         N_align = Xs_align.shape[0]
-        mu_sa, sd_sa = Xs_align.mean(0), Xs_align.std(0) + 1e-6
-        mu_ta, sd_ta = Xt_align.mean(0), Xt_align.std(0) + 1e-6
+        mu_sa = np.array(src_align_cache["mu"])
+        sd_sa = np.array(src_align_cache["sd"])
+        mu_ta = np.array(tgt_align_cache["mu"])
+        sd_ta = np.array(tgt_align_cache["sd"])
         Zs_align = (Xs_align - mu_sa) / sd_sa
         Zt_align = (Xt_align - mu_ta) / sd_ta
         align_all = np.arange(N_align)
@@ -566,9 +586,7 @@ def phase_evaluate(args):
 
     pairs = _resolve_pairs(args)
 
-    for src_gen, tgt_gen, eval_ds, align_ds in pairs:
-        src_model = _model_tag(src_gen)
-        tgt_model = _model_tag(tgt_gen)
+    for src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds in pairs:
         pair_name = f"{src_model}_to_{tgt_model}"
         tag = f"eval_{eval_ds}_align_{align_ds}"
 
@@ -606,14 +624,16 @@ def phase_evaluate(args):
 
         # Reconstruct eval features from cached z-score stats
         # Load raw hidden states for eval dataset
-        H_src, _ = _load_hidden(sc["gen_path"], args.token)
-        H_tgt, _ = _load_hidden(tc["gen_path"], args.token)
+        H_src, ids_src = _load_hidden(sc["gen_path"], args.token)
+        H_tgt, ids_tgt = _load_hidden(tc["gen_path"], args.token)
+        order = _align_ids(ids_src, ids_tgt)
+        H_tgt = H_tgt[:, order]
 
         Ls, Lt = sc["best_layer"], tc["best_layer"]
         eval_idx = np.array(sc["eval_idx"])
         pool = np.array(sc["pool"])
         ys = np.array(sc["y"])
-        yt = np.array(tc["y"])
+        yt = np.array(tc["y"])[order]
 
         mu_s = np.array(sc["mu"])
         sd_s = np.array(sc["sd"])
@@ -1039,7 +1059,7 @@ def phase_summary(args):
     hparam_note = f"aligner hyperparams: {run_tag}"
 
     import matplotlib.pyplot as plt
-    for eval_ds in ("nq", "squad"):
+    for eval_ds in args.datasets:
         fig = _make_summary_fig(eval_ds, "probe_grid", results_dir,
                                 selector, hparam_note)
         stem = f"summary_{eval_ds}_probe_grid_{run_tag}"
@@ -1059,7 +1079,8 @@ def phase_summary(args):
         print("  [venn] skipped: --skip-venn")
     else:
         from sep.transfer.compute_venn import compute_all as compute_venn_all
-        venn_files = compute_venn_all(args.out_dir, aligner_suffix=run_tag, verbose=False)
+        venn_files = compute_venn_all(args.out_dir, eval_datasets=args.datasets,
+                                      aligner_suffix=run_tag, verbose=False)
         if not venn_files:
             print(f"  [venn] skipped: no predictions_align_*_{run_tag}.json found "
                   f"(run evaluate for alpha={args.alpha:g} first)")
@@ -1068,7 +1089,7 @@ def phase_summary(args):
             try:
                 from sep.transfer.plot_venn_grid import build_all as build_venn_figs
                 written = build_venn_figs(args.out_dir, run_tag, n_values=args.n_grid,
-                                          verbose=False)
+                                          datasets=args.datasets, verbose=False)
                 print(f"  [venn] saved {len(written)} files to "
                       f"{os.path.join(args.out_dir, 'summary_plots', 'venn_' + run_tag)}")
             except ImportError as e:
