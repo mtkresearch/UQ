@@ -452,8 +452,10 @@ def phase_align_cache(args):
     timing = _load_timing(args.out_dir)
 
     pairs = _resolve_pairs(args)
+    n_pairs = len(pairs)
 
-    for src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds in pairs:
+    for i, (src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds) in enumerate(pairs, 1):
+        prog = f"{i}/{n_pairs}"
         pair_name = f"{src_model}_to_{tgt_model}"
         # one sub-directory per pair, one file per aligner+hyperparam combo
         pair_align_dir = os.path.join(args.out_dir, "alignments", eval_ds, pair_name)
@@ -467,7 +469,7 @@ def phase_align_cache(args):
         pending = [a for a in args.aligners
                    if not os.path.exists(aligner_out_paths[a]) or args.force]
         if not pending:
-            print(f"[align_cache] skip {pair_name} eval={eval_ds} align={align_ds} (all exist)")
+            print(f"[align_cache {prog}] skip {pair_name} eval={eval_ds} align={align_ds} (all exist)")
             continue
 
         # Load probe caches to get best layers and z-score stats
@@ -487,7 +489,7 @@ def phase_align_cache(args):
         Ls = src_cache["best_layer"]
         Lt = tgt_cache["best_layer"]
 
-        print(f"\n[align_cache] {pair_name}  eval={eval_ds}  align={align_ds}")
+        print(f"\n[align_cache {prog}] {pair_name}  eval={eval_ds}  align={align_ds}")
         print(f"  src best layer: {Ls}  tgt best layer: {Lt}")
 
         # Load alignment hidden states
@@ -585,12 +587,14 @@ def phase_evaluate(args):
     timing.setdefault("evaluate", {})
 
     pairs = _resolve_pairs(args)
+    n_pairs = len(pairs)
 
-    for src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds in pairs:
+    for i, (src_model, src_gen, tgt_model, tgt_gen, eval_ds, align_ds) in enumerate(pairs, 1):
+        prog = f"{i}/{n_pairs}"
         pair_name = f"{src_model}_to_{tgt_model}"
         tag = f"eval_{eval_ds}_align_{align_ds}"
 
-        print(f"\n[evaluate] {pair_name}  {tag}")
+        print(f"\n[evaluate {prog}] {pair_name}  {tag}")
 
         # Load probe caches
         src_probe_path = os.path.join(args.out_dir, "probes", eval_ds, f"{src_model}.pkl")

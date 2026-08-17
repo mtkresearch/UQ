@@ -1,8 +1,13 @@
 #!/bin/bash
-# Alpha ablation sweep for ridge alignment.
-# Phase 1 (probe_cache) must already be complete; it is alpha-independent.
+# Alpha ablation sweep for ridge alignment. Self-contained: runs every phase.
 #
-# Per alpha:  Phase 2 (align_cache) -> Phase 3 (evaluate) -> Phase 4 (summary)
+# Phase 1 (probe_cache) is alpha-independent and runs once up front. It skips any
+# (model, dataset) whose probes/<ds>/<model>.pkl already exists, so running
+# run_transfer_v2.sh first is harmless -- this just picks up its cache.
+#
+# Then, per alpha:  Phase 2 (align_cache) -> Phase 3 (evaluate) -> Phase 4 (summary)
+#   Each alpha is carried end-to-end before the next one starts, so partial
+#   results are usable as soon as that alpha finishes.
 #   Phase 4 emits figures for that alpha only, tagged with it in the filename.
 # Once, at the end: sep.transfer.sweep_summary
 #   compares all alphas on disk -> best-alpha tables + best-alpha figure.
@@ -39,19 +44,23 @@ BASE_ARGS="--out-dir $OUT --token slt --n-grid 50 100 200 400 800 1500 --n-eval 
 PAIR_ARGS="--datasets squad nq --cross-align-dataset squad:nq nq:squad"
 
 echo "=========================================="
-echo "Phase 2: align_cache (all alphas)  $(date '+%H:%M:%S')"
+echo "Phase 1: probe_cache (alpha-independent)  $(date '+%H:%M:%S')"
 echo "=========================================="
-for ALPHA in 1e4 1e5 1e3 1e2 1e1; do
-    check_branch
-    echo "--- align_cache  alpha=$ALPHA  $(date '+%H:%M:%S') ---"
-    python -m sep.transfer.transfer2 align_cache \
-        $BASE_ARGS --alpha $ALPHA \
-        $PAIR_ARGS
-done
+check_branch
+python -m sep.transfer.transfer2 probe_cache \
+    $BASE_ARGS \
+    $PAIR_ARGS
 
 for ALPHA in 1e4 1e5 1e3 1e2 1e1; do
     check_branch
     COMMON="$BASE_ARGS --alpha $ALPHA"
+
+    echo "=========================================="
+    echo "Phase 2: align_cache  alpha=$ALPHA  $(date '+%H:%M:%S')"
+    echo "=========================================="
+    python -m sep.transfer.transfer2 align_cache \
+        $COMMON \
+        $PAIR_ARGS
 
     echo "=========================================="
     echo "Phase 3: evaluate  alpha=$ALPHA  $(date '+%H:%M:%S')"
