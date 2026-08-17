@@ -15,7 +15,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-EXPECTED_BRANCH="exp/transfer-v2-phased"
+EXPECTED_BRANCH="exp/intra-family-transfer"
 CURRENT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
 if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
     echo "ERROR: expected branch '$EXPECTED_BRANCH' but on '$CURRENT_BRANCH'. Refusing to run (checking out mid-sweep deletes untracked-on-that-branch files)." >&2
@@ -41,7 +41,7 @@ PAIR_ARGS="--datasets squad nq --cross-align-dataset squad:nq nq:squad"
 echo "=========================================="
 echo "Phase 2: align_cache (all alphas)  $(date '+%H:%M:%S')"
 echo "=========================================="
-for ALPHA in 1e4 1e5 1e1 1e2; do
+for ALPHA in 1e4 1e5 1e3 1e2 1e1; do
     check_branch
     echo "--- align_cache  alpha=$ALPHA  $(date '+%H:%M:%S') ---"
     python -m sep.transfer.transfer2 align_cache \
@@ -49,7 +49,7 @@ for ALPHA in 1e4 1e5 1e1 1e2; do
         $PAIR_ARGS
 done
 
-for ALPHA in 1e4 1e5 1e1 1e2; do
+for ALPHA in 1e4 1e5 1e3 1e2 1e1; do
     check_branch
     COMMON="$BASE_ARGS --alpha $ALPHA"
 
@@ -64,7 +64,7 @@ for ALPHA in 1e4 1e5 1e1 1e2; do
     echo "Phase 4: summary (this alpha only)  alpha=$ALPHA  $(date '+%H:%M:%S')"
     echo "=========================================="
     python -m sep.transfer.transfer2 summary \
-        $COMMON
+        $COMMON $PAIR_ARGS
 
     echo "--- Done alpha=$ALPHA  $(date '+%H:%M:%S') ---"
     echo ""

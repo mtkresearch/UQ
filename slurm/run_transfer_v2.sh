@@ -46,7 +46,7 @@ echo "=========================================="
 echo "Phase 4: summary plots  $(date '+%H:%M:%S')"
 echo "=========================================="
 python -m sep.transfer.transfer2 summary \
-    $COMMON
+    $COMMON $PAIR_ARGS
 
 echo ""
 echo "All done.  $(date '+%H:%M:%S')"
