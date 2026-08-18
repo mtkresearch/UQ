@@ -149,6 +149,7 @@ python -m sep.transfer.make_timing_table \
     --transfer-v2-timing  "$SCRATCH_BASE/transfer_v2/timing.json" \
     --pair-list           "$REPO_ROOT/slurm/inputs/pair_list.txt" \
     --out-json            "$SCRATCH_BASE/transfer_v2/timing_collect_data.json" \
-    --out-csv-dir         "$SCRATCH_BASE/transfer_v2"
+    --out-csv-dir         "$SCRATCH_BASE/transfer_v2" \
+    --datasets            "${DATASETS[@]}"
 
 echo "Done."

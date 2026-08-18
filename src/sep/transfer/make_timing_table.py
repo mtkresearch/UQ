@@ -33,6 +33,8 @@ import json
 import os
 from datetime import datetime
 
+DEFAULT_DATASETS = ("squad", "nq")
+
 
 def secs(t1, t2):
     fmt = "%Y-%m-%d %H:%M:%S"
@@ -45,20 +47,23 @@ def find_wandb_timing(run_base):
     return matches[0] if matches else None
 
 
-def collect_t1_t2(data_gen_timing_dir):
+def collect_t1_t2(data_gen_timing_dir, datasets=DEFAULT_DATASETS):
     """
     Returns dict: {(dataset, model): {"T1_s": float, "T2_s": float}}
     Reads flat files named {dataset}_{model}.json from data_generation_timing/.
     """
     result = {}
+    skipped = []
+    # Longest prefix first so e.g. "trivia_qa" wins over a hypothetical "trivia".
     for tf in glob.glob(os.path.join(data_gen_timing_dir, "*.json")):
         fname = os.path.splitext(os.path.basename(tf))[0]  # e.g. "squad_llama-3.1-8b"
-        for ds in ("squad", "nq"):
+        for ds in sorted(datasets, key=len, reverse=True):
             if fname.startswith(ds + "_"):
                 model = fname[len(ds) + 1:]
                 dataset = ds
                 break
         else:
+            skipped.append(os.path.basename(tf))
             continue
         with open(tf) as f:
             t = json.load(f)
@@ -67,6 +72,9 @@ def collect_t1_t2(data_gen_timing_dir):
         T2 = secs(t["t2a_clustering_se_start"], t["t2a_clustering_se_end"]) if (
             "t2a_clustering_se_start" in t and "t2a_clustering_se_end" in t) else None
         result[(dataset, model)] = {"T1_s": T1, "T2_s": T2}
+    if skipped:
+        print(f"WARNING: {len(skipped)} timing file(s) in {data_gen_timing_dir} match none "
+              f"of --datasets {list(datasets)}, so their T1/T2 are missing: {sorted(skipped)}")
     return result
 
 
@@ -88,7 +96,7 @@ def _model_tag(gen_path):
     return None
 
 
-def parse_pairs(pair_list_path, datasets=("squad", "nq")):
+def parse_pairs(pair_list_path, datasets=DEFAULT_DATASETS):
     """Parse the pair list.
 
     Two accepted line formats:
@@ -224,10 +232,11 @@ def _ascii(s):
     return s.replace("→", "->").replace("×", "x")
 
 
-def build_tables(collect_timing_base, transfer_v2_timing, pair_list, out_json, out_csv_dir):
-    t1t2  = collect_t1_t2(collect_timing_base)
+def build_tables(collect_timing_base, transfer_v2_timing, pair_list, out_json, out_csv_dir,
+                 datasets=DEFAULT_DATASETS):
+    t1t2  = collect_t1_t2(collect_timing_base, datasets=datasets)
     v2    = load_transfer_v2_timing(transfer_v2_timing)
-    pairs = parse_pairs(pair_list)
+    pairs = parse_pairs(pair_list, datasets=datasets)
 
     collect_data = {
         f"{ds}/{model}": vals
@@ -240,7 +249,7 @@ def build_tables(collect_timing_base, transfer_v2_timing, pair_list, out_json, o
         json.dump(collect_data, f, indent=2)
     print(f"T1/T2 timing saved to {out_json}")
 
-    for ds in ("squad", "nq"):
+    for ds in datasets:
         ds_pairs = [(s, t) for s, t, d in pairs if d == ds]
         rows = [build_row(s, t, ds, t1t2, v2) for s, t in ds_pairs]
 
@@ -272,9 +281,13 @@ def main():
     p.add_argument("--pair-list",           required=True)
     p.add_argument("--out-json",            required=True)
     p.add_argument("--out-csv-dir",         required=True)
+    p.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS),
+                   help="datasets to tabulate; must match the <dataset>_<model>.json "
+                        "filenames in --collect-timing-base (e.g. trivia_qa)")
     args = p.parse_args()
     build_tables(args.collect_timing_base, args.transfer_v2_timing,
-                 args.pair_list, args.out_json, args.out_csv_dir)
+                 args.pair_list, args.out_json, args.out_csv_dir,
+                 datasets=tuple(args.datasets))
 
 
 if __name__ == "__main__":

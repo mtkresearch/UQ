@@ -1110,7 +1110,8 @@ def phase_summary(args):
         from sep.transfer.make_timing_table import build_tables
         timing_json = os.path.join(args.out_dir, "timing.json")
         out_json = os.path.join(args.out_dir, "timing_collect_data.json")
-        build_tables(data_gen_timing_dir, timing_json, pair_list, out_json, args.out_dir)
+        build_tables(data_gen_timing_dir, timing_json, pair_list, out_json, args.out_dir,
+                     datasets=tuple(args.datasets))
         print(f"Timing tables saved to {args.out_dir}")
     else:
         if not os.path.isdir(data_gen_timing_dir):
