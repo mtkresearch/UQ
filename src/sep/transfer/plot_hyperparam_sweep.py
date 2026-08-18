@@ -80,13 +80,14 @@ def _metric_suffix(metric):
     return "" if metric == "auroc" else f"_{metric}"
 
 
-def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams, metric="auroc"):
+def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams, metric="auroc", axis="probe_budget"):
 
     blues   = _blues(len(ridge_alphas))
     greens  = _greens(len(e2map_lams))
     purples = _purples(len(e2r0_lams))
     reds    = _reds(len(e2rstar_lams))
     ms = _metric_suffix(metric)
+    bs = "_src_probe_budget" if axis == "probe_budget" else ""
 
     # --- Baselines: curve A and curve C (loaded once) ---
     baseline_path = os.path.join(pair_dir, f"transfer_{token}_baselines.json")
@@ -107,7 +108,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
         print(f"  WARNING: {e}")
         g = None
 
-    # --- Ridge alpha sweep (probe-budget) ---
+    # --- Ridge alpha sweep ---
     for idx, alpha in enumerate(ridge_alphas):
         fname = f"transfer_{token}{_alpha_suffix(alpha)}_rdg.json"
         path  = os.path.join(pair_dir, fname)
@@ -115,7 +116,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
             r = load_json(path)
             if g is None:
                 g = r["n_grid"]
-            key = f"curveB_ridge_src_probe_budget{ms}"
+            key = f"curveB_ridge{bs}{ms}"
             if key in r:
                 ax.plot(g, _nan(r[key]),
                         color=blues[idx], ls="--", marker="s", ms=4, lw=1.2,
@@ -123,7 +124,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
         except FileNotFoundError as e:
             print(f"  WARNING: {e}")
 
-    # --- E2-map lambda sweep (probe-budget) ---
+    # --- E2-map lambda sweep ---
     for idx, lam in enumerate(e2map_lams):
         fname = f"transfer_{token}_lam{lam}_e2m.json"
         path  = os.path.join(pair_dir, fname)
@@ -131,7 +132,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
             r = load_json(path)
             if g is None:
                 g = r["n_grid"]
-            key = f"curveB_e2_map_src_probe_budget{ms}"
+            key = f"curveB_e2_map{bs}{ms}"
             if key in r:
                 ax.plot(g, _nan(r[key]),
                         color=greens[idx], ls="-.", marker="X", ms=4, lw=1.2,
@@ -139,7 +140,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
         except FileNotFoundError as e:
             print(f"  WARNING: {e}")
 
-    # --- E2-R0 lambda sweep (probe-budget) ---
+    # --- E2-R0 lambda sweep ---
     for idx, lam in enumerate(e2r0_lams):
         fname = f"transfer_{token}_lam{_lam_str(lam)}_e2r0.json"
         path  = os.path.join(pair_dir, fname)
@@ -147,7 +148,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
             r = load_json(path)
             if g is None:
                 g = r["n_grid"]
-            key = f"curveB_e2_r0_src_probe_budget{ms}"
+            key = f"curveB_e2_r0{bs}{ms}"
             if key in r:
                 ax.plot(g, _nan(r[key]),
                         color=purples[idx], ls=":", marker="h", ms=4, lw=1.2,
@@ -155,7 +156,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
         except FileNotFoundError as e:
             print(f"  WARNING: {e}")
 
-    # --- E2-R* lambda sweep (probe-budget) ---
+    # --- E2-R* lambda sweep ---
     for idx, lam in enumerate(e2rstar_lams):
         fname = f"transfer_{token}_lam{_lam_str(lam)}_e2rstar.json"
         path  = os.path.join(pair_dir, fname)
@@ -163,7 +164,7 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
             r = load_json(path)
             if g is None:
                 g = r["n_grid"]
-            key = f"curveB_e2_rstar_src_probe_budget{ms}"
+            key = f"curveB_e2_rstar{bs}{ms}"
             if key in r:
                 ax.plot(g, _nan(r[key]),
                         color=reds[idx], ls="-", marker="*", ms=4, lw=1.2,
@@ -172,8 +173,9 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
             print(f"  WARNING: {e}")
 
     ylabel = "eval AUROC" if metric == "auroc" else "error rate  Pr(ẑ ≠ z)"
+    xlabel = "unlabeled map-fitting pairs" if axis == "map_budget" else "labeled source probe examples"
     ax.set_xscale("log")
-    ax.set_xlabel("labeled source probe examples")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(pair_label, fontsize=10)
     ax.grid(True, ls="--", lw=0.4, alpha=0.6)
@@ -181,7 +183,8 @@ def _draw_panel(ax, pair_dir, pair_label, token, ridge_alphas, e2map_lams, e2r0_
 
 
 def plot_sweep(pairs_dir, pair_names, pair_labels, token,
-               ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams, out_dir, metric="auroc"):
+               ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams, out_dir, metric="auroc",
+               axis="probe_budget"):
     n = len(pair_names)
     ncols = 3
     nrows = (n + ncols - 1) // ncols
@@ -190,20 +193,23 @@ def plot_sweep(pairs_dir, pair_names, pair_labels, token,
 
     for ax, name, label in zip(ax_list, pair_names, pair_labels):
         pair_dir = os.path.join(pairs_dir, name)
-        _draw_panel(ax, pair_dir, label, token, ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams, metric=metric)
+        _draw_panel(ax, pair_dir, label, token, ridge_alphas, e2map_lams, e2r0_lams, e2rstar_lams,
+                    metric=metric, axis=axis)
 
     for ax in ax_list[n:]:
         ax.axis("off")
 
     metric_label = "AUROC" if metric == "auroc" else "error rate  Pr(ẑ ≠ z)"
+    axis_label = "map fitting budget" if axis == "map_budget" else "probe training budget"
     fig.suptitle(
-        f"Ridge (α sweep) vs E2-map (λ sweep) vs E2-R0 (λ sweep) vs E2-R* (λ sweep) — probe training budget ({token.upper()}) — {metric_label}",
+        f"Ridge (α sweep) vs E2-map (λ sweep) vs E2-R0 (λ sweep) vs E2-R* (λ sweep) — {axis_label} ({token.upper()}) — {metric_label}",
         fontsize=13)
     plt.tight_layout()
 
     os.makedirs(out_dir, exist_ok=True)
     ms = _metric_suffix(metric)
-    path = os.path.join(out_dir, f"ALL_pairs_hyperparam_sweep_{token}{ms}.png")
+    axis_tag = "_mapbudget" if axis == "map_budget" else ""
+    path = os.path.join(out_dir, f"ALL_pairs_hyperparam_sweep_{token}{axis_tag}{ms}.png")
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"saved -> {path}")
@@ -226,13 +232,16 @@ def main():
                    default=[1, 10, 100, 1000, 10000])
     p.add_argument("--metric", default="auroc", choices=["auroc", "error_rate"],
                    help="which metric to plot on the y-axis")
+    p.add_argument("--axis", default="probe_budget", choices=["probe_budget", "map_budget"],
+                   help="which budget axis to plot")
     p.add_argument("--out-dir", default=None)
     a = p.parse_args()
     labels = a.pair_labels if a.pair_labels else a.pair_names
     assert len(labels) == len(a.pair_names), "--pair-labels must match --pair-names"
     out = a.out_dir if a.out_dir else a.pairs_dir
     plot_sweep(a.pairs_dir, a.pair_names, labels, a.token,
-               a.ridge_alphas, a.e2map_lams, a.e2r0_lams, a.e2rstar_lams, out, metric=a.metric)
+               a.ridge_alphas, a.e2map_lams, a.e2r0_lams, a.e2rstar_lams, out, metric=a.metric,
+               axis=a.axis)
 
 
 if __name__ == "__main__":
