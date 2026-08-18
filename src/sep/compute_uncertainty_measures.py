@@ -5,6 +5,7 @@ import logging
 import os
 import pickle
 import random
+import time
 import numpy as np
 import wandb
 
@@ -29,7 +30,9 @@ utils.setup_logger()
 
 EXP_DETAILS = 'experiment_details.pkl'
 
-def main(args):
+def main(args, _timing=None):
+    if _timing is None:
+        _timing = {}
 
     if args.train_wandb_runid is None:
         args.train_wandb_runid = args.eval_wandb_runid
@@ -169,6 +172,8 @@ def main(args):
     validation_embeddings, validation_is_true, validation_answerable = [], [], []
     p_trues = []
     count = 0  # pylint: disable=invalid-name
+    logging.info('TIMING: DeBERTa entailment + clustering + SE label START')
+    _timing['t2a_clustering_se_start'] = time.strftime('%Y-%m-%d %H:%M:%S')
 
     def is_answerable(generation):
         return len(generation['reference']['answers']['text']) > 0
@@ -319,6 +324,9 @@ def main(args):
         result_dict['alt_validation_accuracies_mean'] = accuracies_mean
         result_dict['alt_validation_is_false'] = {k: [1 - vi for vi in v] for k, v in accuracies.items()}
 
+    logging.info('TIMING: DeBERTa entailment + clustering + SE label END')
+    _timing['t2a_clustering_se_end'] = time.strftime('%Y-%m-%d %H:%M:%S')
+
     if args.compute_p_ik or args.compute_p_ik_answerable:
         # Assemble training data for embedding classification.
         train_is_true, train_embeddings, train_answerable = [], [], []
@@ -333,11 +341,13 @@ def main(args):
 
     if args.compute_p_ik:
         logging.info('Starting training p_ik on train embeddings.')
+        _timing['t2b_probe_start'] = time.strftime('%Y-%m-%d %H:%M:%S')
         # Train classifier of correct/incorrect.
         p_ik_predictions = get_p_ik(
             train_embeddings=train_embeddings, is_false=train_is_false,
             eval_embeddings=validation_embeddings, eval_is_false=validation_is_false)
         result_dict['uncertainty_measures']['p_ik'] = p_ik_predictions
+        _timing['t2b_probe_end'] = time.strftime('%Y-%m-%d %H:%M:%S')
         logging.info('Finished training p_ik on train embeddings.')
 
     if args.compute_p_ik_answerable:

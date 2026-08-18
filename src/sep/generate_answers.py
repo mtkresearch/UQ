@@ -1,8 +1,10 @@
 """Predict with LLM on task."""
 import gc
+import json
 import os
 import logging
 import random
+import time
 from tqdm import tqdm
 
 import numpy as np
@@ -278,15 +280,30 @@ def cli():
     if args.compute_uncertainties:
         args.assign_new_wandb_id = False
 
+    _timing = {}
+
     logging.info('STARTING `generate_answers`!')
+    _timing['t1_inference_start'] = time.strftime('%Y-%m-%d %H:%M:%S')
     main(args)
+    _timing['t1_inference_end'] = time.strftime('%Y-%m-%d %H:%M:%S')
     logging.info('FINISHED `generate_answers`!')
 
     if args.compute_uncertainties:
         logging.info(50 * '#X')
         logging.info('STARTING `compute_uncertainty_measures`!')
-        main_compute(args)
+        main_compute(args, _timing=_timing)
         logging.info('FINISHED `compute_uncertainty_measures`!')
+
+    # Save timing summary to JSON in the run output directory.
+    # run_collect_timing.sh harvests these into transfer_v2/data_generation_timing/
+    # as T1 (answer sampling) and T2 (semantic clustering).
+    try:
+        timing_path = os.path.join(wandb.run.dir, 'timing.json')
+        with open(timing_path, 'w') as f:
+            json.dump(_timing, f, indent=2)
+        logging.info('TIMING summary saved to %s', timing_path)
+    except Exception as e:
+        logging.warning('Could not save timing.json: %s', e)
 
 
 if __name__ == '__main__':
