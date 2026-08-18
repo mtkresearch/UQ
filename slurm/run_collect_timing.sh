@@ -83,8 +83,7 @@ launch_large() {
             --config "$cfg" \
             --dataset "$dataset" \
             --num_samples "$NUM_SAMPLES" \
-            --compute_uncertainties \
-            --multi_gpu
+            --compute_uncertainties
     ) >"$log" 2>&1 &
     gpu_pid[$gpus]=$!
 }

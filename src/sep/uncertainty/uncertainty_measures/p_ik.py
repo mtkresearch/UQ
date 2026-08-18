@@ -20,8 +20,9 @@ def get_p_ik(train_embeddings, is_false, eval_embeddings=None, eval_is_false=Non
 
     # Convert the list of tensors to a 2D tensor.
     train_embeddings_tensor = torch.cat(train_embeddings, dim=0)  # pylint: disable=no-member
-    # Convert the tensor to a numpy array.
-    embeddings_array = train_embeddings_tensor.cpu().numpy()
+    # Convert the tensor to a numpy array. .float() first: hidden states come off the
+    # model in bfloat16, which numpy has no dtype for ("unsupported ScalarType BFloat16").
+    embeddings_array = train_embeddings_tensor.float().cpu().numpy()
 
     # Split the data into training and test sets.
     X_train, X_test, y_train, y_test = train_test_split(  # pylint: disable=invalid-name
@@ -32,7 +33,7 @@ def get_p_ik(train_embeddings, is_false, eval_embeddings=None, eval_is_false=Non
     model.fit(X_train, y_train)
 
     # Predict deterministically and probabilistically and compute accuracy and auroc for all splits.
-    X_eval = torch.cat(eval_embeddings, dim=0).cpu().numpy()  # pylint: disable=no-member,invalid-name
+    X_eval = torch.cat(eval_embeddings, dim=0).float().cpu().numpy()  # pylint: disable=no-member,invalid-name
     y_eval = eval_is_false
 
     Xs = [X_train, X_test, X_eval]  # pylint: disable=invalid-name
