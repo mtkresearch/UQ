@@ -24,6 +24,7 @@ Usage:
         [--pair-list slurm/inputs/pair_list.txt] [--n-target 1500]
 """
 import argparse
+import csv
 import os
 import re
 
@@ -129,10 +130,16 @@ def discover_pair_names(pair_list_path):
         if not line or line.startswith("#"):
             continue
         parts = line.split()
-        if len(parts) != 4:
+        # 2-field format: "<src_model> <tgt_model>" (matches transfer2._resolve_pairs).
+        # Legacy 4-field format held generation paths, so model names needed extracting.
+        if len(parts) == 2:
+            src, tgt = parts
+        elif len(parts) == 4:
+            src, tgt = _model_tag(parts[0]), _model_tag(parts[1])
+        else:
+            print(f"WARNING: bad pair line (expected 2 fields): {line}")
             continue
-        src_gen, tgt_gen, _, _ = parts
-        pairs.add(f"{_model_tag(src_gen)}_to_{_model_tag(tgt_gen)}")
+        pairs.add(f"{src}_to_{tgt}")
     return sorted(pairs)
 
 
@@ -155,16 +162,18 @@ def _fmt_rank_cell(entry):
 
 
 def _write_table(header, rows_of_vals, out_dir, stem):
-    lines_csv = [",".join(header)]
     lines_md = ["| " + " | ".join(header) + " |",
                 "|" + "|".join(["---"] * len(header)) + "|"]
     for vals in rows_of_vals:
-        lines_csv.append(",".join(vals))
         lines_md.append("| " + " | ".join(vals) + " |")
     csv_path = os.path.join(out_dir, f"{stem}.csv")
     md_path = os.path.join(out_dir, f"{stem}.md")
-    with open(csv_path, "w") as f:
-        f.write("\n".join(lines_csv) + "\n")
+    # csv.writer, not ",".join: rank cells embed a comma ("rank=1.00, 6/6 wins")
+    # and would otherwise split into two columns, shifting every later column.
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows_of_vals)
     with open(md_path, "w") as f:
         f.write("\n".join(lines_md) + "\n")
     return csv_path, md_path

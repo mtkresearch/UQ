@@ -83,9 +83,10 @@ check_branch
 echo "=========================================="
 echo "Sweep summary: cross-alpha comparison  $(date '+%H:%M:%S')"
 echo "=========================================="
+# NB: sweep_summary takes only --out-dir/--pair-list/--n-target. Its eval_ds x
+# align_ds combos are hardcoded (nq/squad), so $PAIR_ARGS must not be passed.
 python -m sep.transfer.sweep_summary \
-    --out-dir "$OUT" \
-    $PAIR_ARGS
+    --out-dir "$OUT"
 
 echo ""
 echo "All alphas complete.  $(date '+%H:%M:%S')"
