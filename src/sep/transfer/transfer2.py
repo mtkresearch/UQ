@@ -907,7 +907,8 @@ def _alpha_from_label(label):
     return m.group(1) if m else None
 
 
-def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_note):
+def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_note,
+                      cross_datasets=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -930,10 +931,11 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
         _SHORT.get(src, src) for src, _ in _LLAMA_FAMILY
     ]
 
-    same_ds     = eval_ds
-    cross_ds    = "squad" if eval_ds == "nq" else "nq"
-    ds_label    = eval_ds.upper()
-    cross_label = cross_ds.upper()
+    same_ds      = eval_ds
+    if cross_datasets is None:
+        cross_datasets = ["squad"] if eval_ds == "nq" else ["nq"]
+    ds_label     = eval_ds.upper()
+    cross_label  = " / ".join(d.upper() for d in cross_datasets)
     grid_label  = "Probe grid"
     xlabel      = "source probe training examples"
 
@@ -990,9 +992,9 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
                         markersize=4, markeredgewidth=0, linestyle="-",
                         label="A: source probe on src", zorder=3)
 
-            # one grid file each for same-align and cross-align, chosen by the caller
-            same_pick  = select_variant(pair_dir, same_ds)
-            cross_pick = select_variant(pair_dir, cross_ds)
+            # one grid file for same-align; one per cross-align dataset
+            same_pick   = select_variant(pair_dir, same_ds)
+            cross_picks = [(ds, select_variant(pair_dir, ds)) for ds in cross_datasets]
 
             if same_pick is not None:
                 same_label, same = same_pick
@@ -1004,16 +1006,19 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
                                 markersize=4, markeredgewidth=0, linestyle="-",
                                 label=f"B: {same_label} ({ds_label})", zorder=3)
 
-            if cross_pick is not None:
-                cross_label_txt, cross = cross_pick
-                xg = cross["n_grid"]
-                for i, a in enumerate(cross.get("aligners", ["ridge"])):
-                    curve = cross.get(f"curveB_{a}")
-                    if curve:
-                        c = C_ALIGNER_CROSS[i % len(C_ALIGNER_CROSS)]
-                        ax.plot(xg, curve, color=c, linewidth=1.5, marker="s",
-                                markersize=4, markeredgewidth=0, linestyle="--",
-                                label=f"B: {cross_label_txt} ({cross_label})", zorder=3)
+            color_idx = 0
+            for ds, cross_pick in cross_picks:
+                if cross_pick is not None:
+                    cross_label_txt, cross = cross_pick
+                    xg = cross["n_grid"]
+                    for i, a in enumerate(cross.get("aligners", ["ridge"])):
+                        curve = cross.get(f"curveB_{a}")
+                        if curve:
+                            c = C_ALIGNER_CROSS[color_idx % len(C_ALIGNER_CROSS)]
+                            ax.plot(xg, curve, color=c, linewidth=1.5, marker="s",
+                                    markersize=4, markeredgewidth=0, linestyle="--",
+                                    label=f"B: {cross_label_txt} ({ds.upper()})", zorder=3)
+                            color_idx += 1
 
             ax.set_xscale("log")
             ax.set_xlabel(xlabel, fontsize=7, color=INK_SEC)
@@ -1030,7 +1035,8 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
             # selector it varies per panel, so it has to be shown per panel.
             alpha_note = ""
             same_a = _alpha_from_label(same_pick[0] if same_pick else None)
-            cross_a = _alpha_from_label(cross_pick[0] if cross_pick else None)
+            first_cross = next((p for _, p in cross_picks if p is not None), None)
+            cross_a = _alpha_from_label(first_cross[0] if first_cross else None)
             if same_a or cross_a:
                 alpha_note = (f"  α: {ds_label}={same_a or '-'}, "
                               f"{cross_label}={cross_a or '-'}")
@@ -1063,9 +1069,15 @@ def phase_summary(args):
     hparam_note = f"aligner hyperparams: {run_tag}"
 
     import matplotlib.pyplot as plt
+    cross_map = {}  # eval_ds -> [align_ds, ...]
+    for mapping in (args.cross_align_dataset or []):
+        ed, ad = mapping.split(":")
+        cross_map.setdefault(ed, []).append(ad)
+
     for eval_ds in args.datasets:
+        cross_ds_list = cross_map.get(eval_ds) or None
         fig = _make_summary_fig(eval_ds, "probe_grid", results_dir,
-                                selector, hparam_note)
+                                selector, hparam_note, cross_datasets=cross_ds_list)
         stem = f"summary_{eval_ds}_probe_grid_{run_tag}"
         for ext in ("pdf", "png"):
             path = os.path.join(plots_dir, f"{stem}.{ext}")
@@ -1092,8 +1104,14 @@ def phase_summary(args):
             print(f"  [venn] computed {len(venn_files)} venn stat files ({run_tag})")
             try:
                 from sep.transfer.plot_venn_grid import build_all as build_venn_figs
+                all_align_ds = list(args.datasets)
+                for ad in [ad for ads in cross_map.values() for ad in ads]:
+                    if ad not in all_align_ds:
+                        all_align_ds.append(ad)
                 written = build_venn_figs(args.out_dir, run_tag, n_values=args.n_grid,
-                                          datasets=args.datasets, verbose=False)
+                                          datasets=tuple(args.datasets),
+                                          align_datasets=tuple(all_align_ds),
+                                          verbose=False)
                 print(f"  [venn] saved {len(written)} files to "
                       f"{os.path.join(args.out_dir, 'summary_plots', 'venn_' + run_tag)}")
             except ImportError as e:

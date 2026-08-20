@@ -2,7 +2,7 @@
 set -e  # stop on first error
 
 PYTHON=/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python
-export PYTHONPATH=/build_bak/UQ/UQ-transfer/src
+export PYTHONPATH=/build_bak/UQ/UQ-transfer/src:/build_bak/UQ/python_packages
 
 SCRATCH=/build_bak/UQ_project/sep_scratch
 UQT_SCRATCH=/build_bak/UQ/UQ-transfer/sep_scratch

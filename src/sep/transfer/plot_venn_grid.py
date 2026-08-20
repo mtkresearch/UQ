@@ -256,8 +256,12 @@ def make_table(eval_ds, results_dir, aligner_suffix, out_path, datasets=("nq", "
 
 
 def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
-              datasets=("nq", "squad"), verbose=True):
-    """Write the 24 venn figures + 2 tables for ONE aligner+hyperparam combo.
+              datasets=("nq", "squad"), align_datasets=None, verbose=True):
+    """Write venn figures + tables for ONE aligner+hyperparam combo.
+
+    `datasets` controls which eval_ds values are plotted (outer loop).
+    `align_datasets` controls which align_ds values are plotted (inner loop);
+    defaults to `datasets` when not specified, preserving the original behaviour.
 
     Outputs go to <out_dir>/summary_plots/venn_<aligner_suffix>/.
     Returns list of written paths.
@@ -266,6 +270,9 @@ def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    if align_datasets is None:
+        align_datasets = datasets
+
     results_dir = os.path.join(out_dir, "results")
     plots_dir = os.path.join(out_dir, "summary_plots", f"venn_{aligner_suffix}")
     os.makedirs(plots_dir, exist_ok=True)
@@ -273,7 +280,7 @@ def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
 
     # ── figures: eval_ds × align_ds × len(n_values) ──────────────────────────
     for eval_ds in datasets:
-        for align_ds in datasets:
+        for align_ds in align_datasets:
             for n in n_values:
                 fig = plot_venn_fig(eval_ds, align_ds, n, results_dir, aligner_suffix)
                 path = os.path.join(plots_dir,
@@ -287,7 +294,7 @@ def build_all(out_dir, aligner_suffix, n_values=(50, 100, 200, 400, 800, 1500),
     # ── tables: one per eval_ds ───────────────────────────────────────────────
     for eval_ds in datasets:
         csv_path = os.path.join(plots_dir, f"table_{eval_ds}_{aligner_suffix}.csv")
-        make_table(eval_ds, results_dir, aligner_suffix, csv_path, datasets=datasets)
+        make_table(eval_ds, results_dir, aligner_suffix, csv_path, datasets=align_datasets)
         written.append(csv_path)
 
     return written

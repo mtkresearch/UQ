@@ -2,7 +2,7 @@
 set -e
 
 PYTHON=/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python
-export PYTHONPATH=/build_bak/UQ/UQ-transfer/src
+export PYTHONPATH=/build_bak/UQ/UQ-transfer/src:/build_bak/UQ/python_packages
 
 SQUAD_SCRATCH=/proj/MR_dataset/mtk53728/UQ/sep_scratch/squad_all_20260723_204926
 OUT_DIR=sep_scratch/transfer/e2_compare_squad
