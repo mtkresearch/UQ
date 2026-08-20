@@ -100,10 +100,14 @@ def remove_split_layer(device_map_in):
 class HuggingfaceModel(BaseModel):
     """HuggingfaceModel."""
 
-    def __init__(self, model_name, stop_sequences=None, max_new_tokens=None):
+    def __init__(self, model_name, stop_sequences=None, max_new_tokens=None,
+                 multi_gpu=False):
         if max_new_tokens is None:
             raise
         self.max_new_tokens = max_new_tokens
+        # Opt-in only (see the caveat in the comment below): models too big for one
+        # card (phi-4, gemma-4-12b, mistral-nemo at bf16) need `auto` to shard.
+        _device_map = 'auto' if multi_gpu else 'cuda'
 
         if stop_sequences == 'default':
             stop_sequences = STOP_SEQUENCES
@@ -209,7 +213,7 @@ class HuggingfaceModel(BaseModel):
                     model_id, token_type_ids=None,
                     clean_up_tokenization_spaces=False)
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    model_id, device_map='cuda', dtype=torch.bfloat16, **kwargs,)
+                    model_id, device_map=_device_map, dtype=torch.bfloat16, **kwargs,)
 
         elif 'falcon' in model_name:
             model_id = f'tiiuae/{model_name}'
@@ -234,7 +238,7 @@ class HuggingfaceModel(BaseModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                device_map='cuda',
+                device_map=_device_map,
                 dtype=torch.bfloat16,
             )
         elif 'gemma' in model_name:
@@ -248,7 +252,7 @@ class HuggingfaceModel(BaseModel):
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                device_map='cuda',
+                device_map=_device_map,
                 dtype=torch.bfloat16,
             )
         elif 'qwen' in model_name.lower():
@@ -257,7 +261,7 @@ class HuggingfaceModel(BaseModel):
                 model_id, token_type_ids=None,
                 clean_up_tokenization_spaces=False)
             qwen_kwargs = dict(
-                device_map='cuda',
+                device_map=_device_map,
                 dtype=torch.bfloat16,
             )
             try:

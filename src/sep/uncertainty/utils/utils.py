@@ -108,6 +108,10 @@ def get_parser(stages=['generate', 'compute'], config_paths=None):
         parser.add_argument('--compute_p_true', default=d('compute_p_true', True),
                             action=argparse.BooleanOptionalAction)
         parser.add_argument(
+            '--multi_gpu', default=d('multi_gpu', False),
+            action=argparse.BooleanOptionalAction,
+            help='Use device_map=auto to shard model across all visible GPUs.')
+        parser.add_argument(
             "--brief_always", default=d('brief_always', False), action=argparse.BooleanOptionalAction)
         parser.add_argument(
             "--enable_brief", default=d('enable_brief', True), action=argparse.BooleanOptionalAction)
@@ -302,7 +306,8 @@ def init_model(args):
     if any(k in mn_l for k in ('llama', 'falcon', 'mistral', 'phi', 'gemma', 'qwen', 'olmoe')):
         model = HuggingfaceModel(
             mn, stop_sequences='default',
-            max_new_tokens=args.model_max_new_tokens)
+            max_new_tokens=args.model_max_new_tokens,
+            multi_gpu=getattr(args, 'multi_gpu', False))
     else:
         raise ValueError(f'Unknown model_name `{mn}`.')
     return model
