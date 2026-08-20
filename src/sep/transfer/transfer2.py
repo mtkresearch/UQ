@@ -304,15 +304,20 @@ def phase_probe_cache(args):
         X_best = H[best_layer].astype(np.float64)
         Xz_best, mu_best, sd_best = _zscore(X_best[pool], X_best)
 
-        # Fit probes at each n_grid size
+        # Fit probes at each n_grid size.  Time each fit separately: the reported
+        # probe_fit_s must be the cost of training ONE probe at the largest n, not
+        # the sum over the whole grid (which is a sweep artefact, ~3x larger).
         probes = {}
-        t0_probe = time.time()
+        per_n_s = {}
+        t0_grid = time.time()
         for n in n_grid:
             sub = pool[:n]
             if len(np.unique(y[sub])) < 2:
                 probes[n] = None
                 continue
+            t0_n = time.time()
             clf = LogisticRegression(max_iter=1000).fit(Xz_best[sub], y[sub])
+            per_n_s[n] = round(time.time() - t0_n, 3)
             probes[n] = {
                 "coef": clf.coef_.ravel().tolist(),
                 "intercept": float(clf.intercept_[0]),
@@ -320,13 +325,19 @@ def phase_probe_cache(args):
 
         # Source eval AUROC using full-pool probe
         clf_full = LogisticRegression(max_iter=1000).fit(Xz_best[pool], y[pool])
-        probe_fit_s = round(time.time() - t0_probe, 2)
+        grid_s = round(time.time() - t0_grid, 2)
         src_eval_auc = roc_auc_score(y[eval_idx],
                                      clf_full.predict_proba(Xz_best[eval_idx])[:, 1])
 
+        n_reported = max(per_n_s) if per_n_s else None
         timing["probe_cache"].setdefault(model, {})[ds] = {
             "layer_search_s": layer_search_s,
-            "probe_fit_s": probe_fit_s,
+            # single probe fit at the largest n -- this is what the paper reports
+            "probe_fit_s": per_n_s.get(n_reported),
+            "probe_fit_n": n_reported,
+            "probe_fit_per_n_s": per_n_s,
+            # whole-sweep cost, kept for reference (was what probe_fit_s used to hold)
+            "probe_fit_grid_total_s": grid_s,
         }
         _save_timing(args.out_dir, timing)
 
@@ -549,9 +560,15 @@ def phase_align_cache(args):
                 "src_best_layer": Ls, "tgt_best_layer": Lt,
                 "N_align": N_align, "n_grid": valid_grid,
             }
-            t0_align = time.time()
+            # Time each n separately: the reported cost must be ONE alignment fit at
+            # the largest n, not the sum over the grid.  Ridge is dominated by the
+            # d^3 solve and is nearly n-independent, so the grid total is ~5x the
+            # single fit -- reporting the total would badly overstate transfer cost.
+            per_n_s = {}
+            t0_grid = time.time()
             for n in tqdm(valid_grid, desc=f"  {tag} n", ncols=80):
                 sub = align_all[:n]
+                t0_n = time.time()
                 if aligner == "ridge":
                     M, b = _fit_ridge(Zt_align[sub], Zs_align[sub], alpha=args.alpha)
                 elif aligner == "procrustes":
@@ -561,16 +578,23 @@ def phase_align_cache(args):
                     raise NotImplementedError("e2 aligner not yet implemented")
                 else:
                     raise ValueError(f"Unknown aligner: {aligner}")
+                per_n_s[n] = round(time.time() - t0_n, 3)
                 alignment[f"M_{n}"] = M.tolist()
                 alignment[f"b_{n}"] = b.tolist()
-            fit_s = round(time.time() - t0_align, 2)
+            grid_s = round(time.time() - t0_grid, 2)
+            n_reported = max(per_n_s) if per_n_s else None
+            fit_s = per_n_s.get(n_reported)
 
             out_path = aligner_out_paths[aligner]
             with open(out_path, "wb") as f:
                 pickle.dump(alignment, f)
-            print(f"  -> saved {out_path}  ({fit_s}s)")
+            print(f"  -> saved {out_path}  (fit n={n_reported}: {fit_s}s, "
+                  f"whole grid: {grid_s}s)")
 
             ds_timing[tag] = fit_s
+            ds_timing[f"{tag}_n"] = n_reported
+            ds_timing[f"{tag}_per_n_s"] = per_n_s
+            ds_timing[f"{tag}_grid_total_s"] = grid_s
         _save_timing(args.out_dir, timing)
 
 
