@@ -1,23 +1,14 @@
 #!/bin/bash
-# Collect T1 (inference 11x) and T2 (semantic clustering) timing for TriviaQA.
-# Run this AFTER run_transfer_v2_trivia_qa.sh has finished — do not run concurrently
-# as it competes for GPU and would skew the timing measurements.
+# Collect T1 (inference 11x) and T2 (semantic clustering) timing for each model on
+# TriviaQA, using 100 samples, then build the timing table.
+#
+# Outputs (all under $SCRATCH_BASE/transfer_v2):
+#   timing_collect_data_trivia_qa.json   T1/T2 per model
+#   timing_table_trivia_qa.csv           final table
 #
 # Usage:
 #   nohup bash slurm/run_collect_timing_trivia_qa.sh \
-#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_trivia_qa/collect_timing.log 2>&1 &
-# Every path below can be overridden from the environment, so the same script runs
-# against a different scratch layout / interpreter without editing it, e.g.:
-#   SCRATCH_BASE=/proj/MR_dataset/mtk53728/UQ/sep_scratch \
-#   OUT_DIR=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2 \
-#   PYTHON=python PYTHONPATH= \
-#   TRANSFER_TIMING=.../transfer_v2/timing_trivia_qa.json \
-#   OUT_JSON=.../transfer_v2/timing_collect_data_trivia_qa.json \
-#   bash slurm/run_collect_timing_trivia_qa.sh
-# TRANSFER_TIMING / OUT_JSON must be split out when OUT_DIR is shared with another
-# dataset: make_timing_table overwrites OUT_JSON wholesale with only the rows for
-# --datasets, so pointing it at an existing timing_collect_data.json would drop that
-# file's other datasets.
+#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/collect_timing_trivia_qa.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,37 +16,19 @@ cd "$REPO_ROOT"
 
 export WANDB_MODE=offline
 export WANDB_ENT="${WANDB_ENT:-offline}"
-export PYTHONPATH="${PYTHONPATH-/build_bak/UQ/UQ-transfer/src:/build_bak/UQ/python_packages}"
-PYTHON="${PYTHON:-/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python}"
 
-SCRATCH_BASE="${SCRATCH_BASE:-/build_bak/UQ/UQ-transfer/sep_scratch}"
-OUT_DIR="${OUT_DIR:-$SCRATCH_BASE/transfer_v2_trivia_qa}"
-TRANSFER_TIMING="${TRANSFER_TIMING:-$OUT_DIR/timing.json}"
-OUT_JSON="${OUT_JSON:-$OUT_DIR/timing_collect_data.json}"
+SCRATCH_BASE="/proj/MR_dataset/mtk53728/UQ/sep_scratch"
+OUT_DIR="$SCRATCH_BASE/transfer_v2"
 NUM_SAMPLES=100
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-LOG_DIR="$SCRATCH_BASE/collect_timing_trivia_qa_${TIMESTAMP}/logs"
-mkdir -p "$LOG_DIR" "$OUT_DIR"
+RUN_BASE="$SCRATCH_BASE/collect_timing_trivia_qa_${TIMESTAMP}"
+LOG_DIR="$RUN_BASE/logs"
+mkdir -p "$LOG_DIR"
 
 DATASETS=(trivia_qa)
 
-# Fail before spending GPU hours: the T4/T5 half of the table comes from a transfer
-# run, and the final step cannot produce a usable table without it.
-if [ ! -f "$TRANSFER_TIMING" ]; then
-    echo "ERROR: transfer timing not found: $TRANSFER_TIMING" >&2
-    echo "       Run the transfer pipeline for these models first, or point" >&2
-    echo "       TRANSFER_TIMING at an existing timing.json." >&2
-    exit 1
-fi
-echo "Config:"
-echo "  PYTHON          $PYTHON"
-echo "  SCRATCH_BASE    $SCRATCH_BASE"
-echo "  OUT_DIR         $OUT_DIR"
-echo "  TRANSFER_TIMING $TRANSFER_TIMING"
-echo "  OUT_JSON        $OUT_JSON"
-echo "  datasets        ${DATASETS[*]}  |  samples $NUM_SAMPLES"
-echo ""
-
+# Only the models that exist for trivia_qa in slurm/inputs/model_paths.txt
+# (llama-2-7b / mistral-7b have no trivia_qa generations, and no pairs use them).
 SMALL_MODELS=(
     configs/model/llama-3.2-1b.yaml
     configs/model/llama-3.1-8b.yaml
@@ -85,12 +58,12 @@ launch_small() {
     local cfg="$1" dataset="$2" gpu="$3"
     local name
     name=$(basename "$cfg" .yaml)
-    local scratch_dir="$SCRATCH_BASE/collect_timing_trivia_qa_${TIMESTAMP}/${dataset}/${name}"
+    local scratch_dir="$RUN_BASE/${dataset}/${name}"
     local log="$LOG_DIR/${dataset}_${name}.log"
     echo "[$(date '+%H:%M:%S')] Launching $name ($dataset) on GPU $gpu"
     (
         export SCRATCH_DIR="$scratch_dir"
-        CUDA_VISIBLE_DEVICES=$gpu $PYTHON -m sep.generate_answers \
+        CUDA_VISIBLE_DEVICES=$gpu python -m sep.generate_answers \
             --config "$cfg" \
             --dataset "$dataset" \
             --num_samples "$NUM_SAMPLES" \
@@ -104,16 +77,17 @@ launch_large() {
     local name
     name=$(basename "$cfg" .yaml)
     local gpus="${LARGE_GPU_PAIRS[$pair_idx]}"
-    local scratch_dir="$SCRATCH_BASE/collect_timing_trivia_qa_${TIMESTAMP}/${dataset}/${name}"
+    local scratch_dir="$RUN_BASE/${dataset}/${name}"
     local log="$LOG_DIR/${dataset}_${name}.log"
     echo "[$(date '+%H:%M:%S')] Launching $name ($dataset) on GPUs $gpus"
     (
         export SCRATCH_DIR="$scratch_dir"
-        CUDA_VISIBLE_DEVICES=$gpus $PYTHON -m sep.generate_answers \
+        CUDA_VISIBLE_DEVICES=$gpus python -m sep.generate_answers \
             --config "$cfg" \
             --dataset "$dataset" \
             --num_samples "$NUM_SAMPLES" \
-            --compute_uncertainties
+            --compute_uncertainties \
+            --multi_gpu
     ) >"$log" 2>&1 &
     gpu_pid[$gpus]=$!
 }
@@ -153,11 +127,13 @@ wait
 echo ""
 echo "All generation done. Collecting timing.json files..."
 
-DEST="$OUT_DIR/data_generation_timing"
+# Separate destination from the squad/nq one so make_timing_table only sees trivia_qa files.
+DEST="$OUT_DIR/data_generation_timing_trivia_qa"
 mkdir -p "$DEST"
 
 for dataset in "${DATASETS[@]}"; do
-    for model_dir in "$SCRATCH_BASE/collect_timing_trivia_qa_${TIMESTAMP}/${dataset}"/*/; do
+    for model_dir in "$RUN_BASE/${dataset}"/*/; do
+        [[ -d "$model_dir" ]] || continue
         model=$(basename "$model_dir")
         tf=$(find "$model_dir" -path "*/wandb/*/files/timing.json" | head -1)
         if [[ -n "$tf" ]]; then
@@ -172,13 +148,13 @@ done
 echo "T1/T2 timing saved to: $DEST"
 
 echo ""
-echo "Generating timing tables..."
-$PYTHON -m sep.transfer.make_timing_table \
+echo "Generating timing table..."
+python -m sep.transfer.make_timing_table \
     --collect-timing-base "$DEST" \
-    --transfer-v2-timing  "$TRANSFER_TIMING" \
+    --transfer-v2-timing  "$OUT_DIR/timing_trivia_qa.json" \
     --pair-list           "$REPO_ROOT/slurm/inputs/pair_list.txt" \
-    --out-json            "$OUT_JSON" \
+    --out-json            "$OUT_DIR/timing_collect_data_trivia_qa.json" \
     --out-csv-dir         "$OUT_DIR" \
     --datasets            "${DATASETS[@]}"
 
-echo "Done. Timing tables written to: $OUT_DIR"
+echo "Done."
