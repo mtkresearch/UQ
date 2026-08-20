@@ -4,11 +4,11 @@
 set -e
 
 PYTHON=/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python
-export PYTHONPATH=/build_bak/UQ/UQ-transfer/src
+export PYTHONPATH=/build_bak/UQ/UQ-transfer/src:/build_bak/UQ/python_packages
 
 SCRATCH=/build_bak/UQ_project/sep_scratch
 UQT_SCRATCH=/build_bak/UQ/UQ-transfer/sep_scratch
-OUT_DIR=sep_scratch/transfer/hyperparam_sweep_v2
+OUT_DIR=sep_scratch/transfer/hyperparam_sweep_v3
 
 NAMES=(
     llama2_to_mistral
