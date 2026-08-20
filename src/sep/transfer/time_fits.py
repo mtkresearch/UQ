@@ -77,6 +77,25 @@ from sep.transfer.transfer2 import (
     _load_hidden,
 )
 
+def _install_numpy2_pickle_shim():
+    """Let numpy 1.26 unpickle files written by numpy >= 2.0.
+
+    TriviaQA's uncertainty_measures.pkl was written under the other env (numpy 2.5),
+    where the private module was renamed numpy.core -> numpy._core.  The pickled
+    payloads are plain ndarrays, so aliasing the module names is enough.  Only
+    affects reading; nothing is rewritten.
+    """
+    import sys
+    if int(np.__version__.split(".")[0]) >= 2:
+        return
+    import numpy.core
+    sys.modules.setdefault("numpy._core", numpy.core)
+    for name in ("multiarray", "umath", "numeric", "numerictypes", "_multiarray_umath"):
+        mod = getattr(numpy.core, name, None)
+        if mod is not None:
+            sys.modules.setdefault(f"numpy._core.{name}", mod)
+
+
 THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                    "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
 
@@ -90,6 +109,7 @@ def _npz_path(work_dir, ds, model):
 
 
 def phase_extract(args):
+    _install_numpy2_pickle_shim()
     cache_roots = _parse_cache_roots(args.cache_root)
     os.makedirs(os.path.join(args.work_dir, "z"), exist_ok=True)
 
