@@ -157,6 +157,49 @@ def _fit_procrustes(Zt, Zs):
     return M, b
 
 
+def _fit_e2_rstar(Zt, w_s, u_t, lam=1e3):
+    """E2-R*: supervised probe-aware map, min_M ||w_s^T M h_t + b - u_t||^2 + lam*||M||^2_F.
+
+    Regresses the TARGET entropy u_t directly, so this is the labelled-target
+    oracle.  Substituting a = M w_s and beta = w_s^T b turns it into a plain
+    ridge on (Zt, u_t) with alpha_eff = lam/||w_s||^2 (n-independent: the data
+    term is not divided by n).  The optimal M is the minimum-Frobenius-norm
+    solution of M w_s = a, i.e. the rank-1 outer(a, w_s)/||w_s||^2, so we return
+    the rank-1 factors instead of the dense d_t x d_s matrix -- see
+    README_E2R.md.  Reconstruct with _e2_rstar_dense or apply directly with
+    _e2_rstar_transfer.
+
+    Returns (a, beta): a in R^{d_t}, beta scalar.
+    """
+    ws_sq = float(np.dot(w_s, w_s))
+    mu_t = Zt.mean(0)
+    A = Zt - mu_t
+    mu_u = float(u_t.mean())
+    t = u_t - mu_u
+
+    d = A.shape[1]
+    a = np.linalg.solve(A.T @ A + (lam / ws_sq) * np.eye(d), A.T @ t)
+    beta = mu_u - float(mu_t @ a)
+    return a, beta
+
+
+def _e2_rstar_dense(a, beta, w_s):
+    """Materialise the rank-1 (M, b) pair.  Only needed for interop/debugging."""
+    ws_sq = float(np.dot(w_s, w_s))
+    return np.outer(a, w_s) / ws_sq, beta * np.asarray(w_s) / ws_sq
+
+
+def _e2_rstar_transfer(a, beta, w_s, a_s, c_s):
+    """Push a probe (a_s, c_s) through the rank-1 E2-R* map without building M.
+
+    M = outer(a, w_s)/||w_s||^2 and b = beta*w_s/||w_s||^2, so with
+    kappa = (w_s . a_s)/||w_s||^2 we get M @ a_s = kappa*a and b @ a_s = kappa*beta.
+    Exactly equivalent to _transfer_probe on the dense matrices, at O(d) cost.
+    """
+    kappa = float(np.dot(w_s, a_s)) / float(np.dot(w_s, w_s))
+    return kappa * np.asarray(a), kappa * beta + c_s
+
+
 def _transfer_probe(clf, M, b):
     a_s = clf.coef_.ravel()
     c_s = float(clf.intercept_[0])
@@ -185,7 +228,7 @@ def _aligner_tag(aligner, hyperparams=None):
     Each aligner defines its own relevant params:
       ridge      -> {"alpha": 1e3}      -> "ridge_a1e3"
       procrustes -> {}                  -> "procrustes"
-      e2         -> {"lambda_val": 0.5} -> "e2_l0.5"
+      e2_rstar   -> {"lambda_val": 0.5} -> "e2_rstar_l0.5"
     """
     if not hyperparams:
         return aligner
@@ -193,7 +236,7 @@ def _aligner_tag(aligner, hyperparams=None):
     if aligner == "ridge" and "alpha" in hyperparams:
         exp = int(round(np.log10(hyperparams["alpha"])))
         parts.append(f"a1e{exp}")
-    elif aligner == "e2" and "lambda_val" in hyperparams:
+    elif aligner == "e2_rstar" and "lambda_val" in hyperparams:
         parts.append(f"l{hyperparams['lambda_val']}")
     else:
         for k, v in hyperparams.items():
@@ -206,7 +249,7 @@ def _build_hyperparams(args):
     return {
         "ridge":      {"alpha": args.alpha},
         "procrustes": {},
-        "e2":         {"lambda_val": args.lambda_val},
+        "e2_rstar":   {"lambda_val": args.lambda_val},
     }
 
 
@@ -546,6 +589,16 @@ def phase_align_cache(args):
 
         valid_grid = [n for n in n_grid if n <= N_align]
 
+        # E2-R* is supervised by the TARGET entropy on the alignment dataset, and
+        # is probe-aware (w_s enters via alpha_eff = lam/||w_s||^2), so it needs
+        # two extra inputs the unsupervised aligners do not.
+        if "e2_rstar" in pending:
+            ent_t_align = _load_entropy(tgt_align_cache["gen_path"])[order_align]
+            w_s_full = np.array(src_cache["probe_full"]["coef"])
+            # probe-grid probes, keyed by probe training size (None where a
+            # subset had a single class)
+            src_probes_by_n = src_cache["probes_by_n"]
+
         print(f"  fitting alignment matrices for n in {valid_grid}  aligners={pending}")
         os.makedirs(pair_align_dir, exist_ok=True)
         pair_timing = timing["align_cache"].setdefault(pair_name, {})
@@ -573,14 +626,46 @@ def phase_align_cache(args):
                     M, b = _fit_ridge(Zt_align[sub], Zs_align[sub], alpha=args.alpha)
                 elif aligner == "procrustes":
                     M, b = _fit_procrustes(Zt_align[sub], Zs_align[sub])
-                elif aligner == "e2":
-                    # TODO: implement e2 alignment
-                    raise NotImplementedError("e2 aligner not yet implemented")
+                elif aligner == "e2_rstar":
+                    # rank-1: store the (a, beta) factors, not the d_t x d_s matrix
+                    a_e2, beta_e2 = _fit_e2_rstar(
+                        Zt_align[sub], w_s_full, ent_t_align[sub], lam=args.lambda_val)
+                    per_n_s[n] = round(time.time() - t0_n, 3)
+                    alignment[f"a_{n}"] = a_e2.tolist()
+                    alignment[f"beta_{n}"] = beta_e2
+                    alignment[f"w_{n}"] = w_s_full.tolist()
+                    continue
                 else:
                     raise ValueError(f"Unknown aligner: {aligner}")
                 per_n_s[n] = round(time.time() - t0_n, 3)
                 alignment[f"M_{n}"] = M.tolist()
                 alignment[f"b_{n}"] = b.tolist()
+
+            # E2-R* probe grid: alignment data fixed at the largest n, but the map
+            # refit with EACH probe w_n.  Skipping this refit would freeze a, beta
+            # across n and (because M is rank-1) leave AUROC exactly flat -- the
+            # bug fixed in transfer.py:713.  See README_E2R.md section 4.
+            if aligner == "e2_rstar":
+                n_align_full = max(valid_grid)
+                sub_full = align_all[:n_align_full]
+                alignment["n_align_full"] = n_align_full
+                alignment["rank1"] = True
+                probe_per_n_s = {}
+                for n in tqdm(valid_grid, desc=f"  {tag} probe-n", ncols=80):
+                    entry = src_probes_by_n.get(n)
+                    if entry is None:
+                        continue
+                    w_n = np.array(entry["coef"])
+                    t0_n = time.time()
+                    a_pn, beta_pn = _fit_e2_rstar(
+                        Zt_align[sub_full], w_n, ent_t_align[sub_full],
+                        lam=args.lambda_val)
+                    probe_per_n_s[n] = round(time.time() - t0_n, 3)
+                    alignment[f"probe_a_{n}"] = a_pn.tolist()
+                    alignment[f"probe_beta_{n}"] = beta_pn
+                    alignment[f"probe_w_{n}"] = w_n.tolist()
+                ds_timing[f"{tag}_probe_per_n_s"] = probe_per_n_s
+
             grid_s = round(time.time() - t0_grid, 2)
             n_reported = max(per_n_s) if per_n_s else None
             fit_s = per_n_s.get(n_reported)
@@ -637,7 +722,7 @@ def phase_evaluate(args):
         hyperparams = _build_hyperparams(args)
         available_aligners = []
         align_caches = {}
-        for a in ["ridge", "procrustes", "e2"]:
+        for a in ["ridge", "procrustes", "e2_rstar"]:
             tag = _aligner_tag(a, hyperparams.get(a, {}))
             p = os.path.join(pair_align_dir, f"align_{align_ds}_{tag}.pkl")
             if os.path.exists(p):
@@ -683,11 +768,14 @@ def phase_evaluate(args):
         # x-axis = probe training size n; alignment = fixed at max n_grid (1500)
         n_align_full = min(max(valid_grid), ac["N_align"])
 
-        # pre-load the fixed alignment matrices for each aligner (each has its own cache)
+        # pre-load the fixed alignment matrices for each aligner (each has its own cache).
+        # e2_rstar is stored as rank-1 factors refit per probe size, so it is handled
+        # per-n inside the loop instead.
         align_matrices = {
             a: (np.array(align_caches[a][f"M_{n_align_full}"]),
                 np.array(align_caches[a][f"b_{n_align_full}"]))
             for a in available_aligners
+            if not align_caches[a].get("rank1")
         }
 
         # load source eval hidden states for src_probe_pred and src AUROC curve
@@ -772,9 +860,23 @@ def phase_evaluate(args):
 
             _t0 = time.time()
             for a in available_aligners:
-                M_full, b_full = align_matrices[a]
-                a_t = M_full @ a_s_n
-                c_t = float(b_full @ a_s_n) + c_s_n
+                if align_caches[a].get("rank1"):
+                    # e2_rstar: rank-1 factors refit with this n's probe.  Apply the
+                    # map without materialising M (exactly equivalent, O(d) not O(d^2)).
+                    cache_a = align_caches[a]
+                    if f"probe_a_{n}" not in cache_a:
+                        pg[f"curveB_{a}"].append(None)
+                        by_n_entry[f"{a}_pred"] = None
+                        continue
+                    a_t, c_t = _e2_rstar_transfer(
+                        np.array(cache_a[f"probe_a_{n}"]),
+                        cache_a[f"probe_beta_{n}"],
+                        np.array(cache_a[f"probe_w_{n}"]),
+                        a_s_n, c_s_n)
+                else:
+                    M_full, b_full = align_matrices[a]
+                    a_t = M_full @ a_s_n
+                    c_t = float(b_full @ a_s_n) + c_s_n
                 scores = _probe_scores(Zt_eval, a_t, c_t)
                 au = roc_auc_score(yt_eval, scores)
                 pg[f"curveB_{a}"].append(float(au))
@@ -889,14 +991,14 @@ def make_run_variant_selector(grid_type, hyperparams):
     """Selector for phase_summary: pick the grid file matching THIS run's hyperparams.
 
     A probe_grid filename is  <grid_type>_align_<ds>_<tag1>[_<tag2>...].json  where each
-    tag encodes one aligner + its hyperparams (e.g. "ridge_a1e4", "procrustes", "e2_l1.0").
+    tag encodes one aligner + its hyperparams (e.g. "ridge_a1e4", "procrustes", "e2_rstar_l1.0").
     A file belongs to the current run iff every hyperparam-bearing tag in it matches the
     tag implied by the current args (so a ridge_a1e1 file is rejected when alpha=1e4).
 
     Returns a callable (pair_dir, ds_tag) -> (label, pg_dict) or None.
     """
     expected_ridge = _aligner_tag("ridge", hyperparams.get("ridge", {}))
-    expected_e2    = _aligner_tag("e2", hyperparams.get("e2", {}))
+    expected_e2    = _aligner_tag("e2_rstar", hyperparams.get("e2_rstar", {}))
 
     def _select(pair_dir, ds_tag):
         if not os.path.isdir(pair_dir):
@@ -906,11 +1008,11 @@ def make_run_variant_selector(grid_type, hyperparams):
             if not (fname.startswith(prefix) and fname.endswith(".json")):
                 continue
             suffix = fname[len(prefix):-len(".json")]
-            # reject files whose ridge/e2 hyperparams differ from this run's
+            # reject files whose ridge/e2_rstar hyperparams differ from this run's
             m = re.search(r'ridge_a1e-?\d+', suffix)
             if m and m.group(0) != expected_ridge:
                 continue
-            m = re.search(r'e2_l[\d.]+', suffix)
+            m = re.search(r'e2_rstar_l[\d.]+', suffix)
             if m and m.group(0) != expected_e2:
                 continue
             return suffix, _load_json(os.path.join(pair_dir, fname))
@@ -1179,7 +1281,7 @@ def _common_args(p):
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--alpha", type=float, default=1e3)
     p.add_argument("--lambda-val", type=float, default=1.0,
-                   help="lambda hyperparameter for e2 aligner")
+                   help="lambda hyperparameter for the e2_rstar aligner")
     p.add_argument("--force", action="store_true",
                    help="recompute even if cache exists")
     _root = _repo_root()
@@ -1205,7 +1307,7 @@ def main():
                     default=os.path.join(_repo_root(), "slurm", "inputs", "pair_list.txt"),
                     help="text file: src_model tgt_model  (or legacy 4-field format)")
     p2.add_argument("--aligners", nargs="+", default=["ridge"],
-                    choices=["ridge", "procrustes", "e2"],
+                    choices=["ridge", "procrustes", "e2_rstar"],
                     help="alignment methods to fit (default: ridge only)")
 
     p3 = sub.add_parser("evaluate", help="Phase 3: compute AUROC curves")

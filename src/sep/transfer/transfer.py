@@ -418,8 +418,9 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
         Me2m_full, be2m_full = fit_e2_map(Zt[pool], Zs[pool], w_s, c_s, lam=_lam_e2)
     if _run_probe_budget and "e2_r0" in curves:
         Me2r0_full, be2r0_full = fit_e2_r0_map(Zt[pool], Zs[pool], w_s, lam=_lam_e2)
-    if _run_probe_budget and "e2_rstar" in curves:
-        Me2rs_full, be2rs_full = fit_e2_rstar_map(Zt[pool], w_s, ent_t[pool], lam=_lam_e2)
+    # NB: no e2_rstar entry here -- like the other probe-aware maps it is refit
+    # inside the loop with the n-sample probe w_n (w_s enters its solution via
+    # alpha_eff = lam/||w_s||^2, so hoisting it out would freeze the curve).
 
     ent_t_eval = ent_t[eval_idx]
     ent_s_eval = ent_s[eval_idx]
@@ -709,7 +710,8 @@ def run(source_gen, target_gen, token, out_dir, n_eval, n_grid, seed, alpha=1e3,
                     _venn("e2_r0", "probe_budget", n, src_pred_n, sc_e2r0n)
 
                 if "e2_rstar" in curves:
-                    a_te2rs_n, c_te2rs_n = transfer_probe(src_native, Me2rs_full, be2rs_full)
+                    Me2rs_n, be2rs_n = fit_e2_rstar_map(Zt[pool], w_n, ent_t[pool], lam=_lam_e2)
+                    a_te2rs_n, c_te2rs_n = transfer_probe(src_native, Me2rs_n, be2rs_n)
                     sc_e2rsn = probe_scores(Zt_eval, a_te2rs_n, c_te2rs_n)
                     _append("curveB_e2_rstar_src_probe_budget", float(roc_auc_score(yt_eval, sc_e2rsn)))
                     rho_e2rsn, tau_e2rsn = _rank(ent_t_eval, sc_e2rsn)
