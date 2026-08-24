@@ -11,7 +11,7 @@ export PYTHONPATH=/build_bak/UQ/UQ-transfer/src:/build_bak/UQ/python_packages
 
 SCRATCH=/build_bak/UQ_project/sep_scratch
 UQT_SCRATCH=/build_bak/UQ/UQ-transfer/sep_scratch
-OUT_DIR=sep_scratch/transfer/hyperparam_sweep_v3
+OUT_DIR=sep_scratch/transfer/hyperparam_sweep_v3_fixed
 
 NAMES=(
     llama2_to_mistral
