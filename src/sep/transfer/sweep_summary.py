@@ -3,25 +3,41 @@
 This module is deliberately SEPARATE from transfer2.py's Phase 4:
   * Phase 4 (transfer2.py summary) = one complete experiment, figures conditioned
     on the single aligner/hyperparam configuration that invocation was given.
-  * This module = compares ACROSS the ridge-alpha variants already on disk and
-    reports which alpha wins. It reads only Phase 3 outputs, computes nothing new,
-    and is meant to run ONCE after a sweep has finished all its alphas.
+  * This module = compares ACROSS the hyperparam variants already on disk and
+    reports which one wins. It reads only Phase 3 outputs, computes nothing new,
+    and is meant to run ONCE after a sweep has finished all its values.
 
-Outputs (under <out_dir>/sweep_summary/):
-  hparam_alpha_table_rank.{csv,md}   best alpha per pair: avg-rank across n, and at n=1500
-  hparam_alpha_table_per_n.{csv,md}  best alpha at EVERY n, unaggregated
-  summary_{eval_ds}_probe_grid_alpha_best.{pdf,png}
-                                     main grid figure where same-align and cross-align
-                                     each use their own best alpha (by avg rank)
-  alpha_curves_{eval_ds}_align_{align_ds}.{pdf,png}
-                                     every alpha as its own curve, one figure per
-                                     alignment dataset (same-align vs cross-align), so
-                                     the alpha ordering itself is visible rather than
-                                     collapsed to a single winner
+Two sweep axes are supported, selected with --hparam:
+  alpha   ridge alignment, files probe_grid_align_<ds>_ridge_a1e<exp>.json,
+          curve curveB_ridge                                  (the original mode)
+  lambda  E2-R* alignment, files probe_grid_align_<ds>_[...]e2_rstar_l<val>.json,
+          curve curveB_e2_rstar
+
+Which (eval_ds, align_ds) combos are reported follows --datasets: the cross product
+of the datasets given. With `--datasets nq` that is just (nq, nq), i.e. the probe and
+the alignment both trained on NQ and no cross-align curves.
+
+Outputs (under <out_dir>/sweep_summary/, <hp> = alpha|lambda):
+  hparam_<hp>_table_rank.{csv,md}   best value per pair: avg-rank across n, and at n=1500
+  hparam_<hp>_table_per_n.{csv,md}  best value at EVERY n, unaggregated
+  summary_{eval_ds}_probe_grid_<hp>_best.{pdf,png}
+                                    main grid figure where same-align and cross-align
+                                    each use their own best value (by avg rank)
+  <hp>_curves_{eval_ds}_align_{align_ds}.{pdf,png}
+                                    every value as its own curve, one figure per
+                                    alignment dataset (same-align vs cross-align), so
+                                    the ordering itself is visible rather than
+                                    collapsed to a single winner
 
 Usage:
+    # ridge alpha sweep, squad + nq (original behaviour, unchanged defaults)
+    python -m sep.transfer.sweep_summary --out-dir <cache_dir>
+
+    # E2-R* lambda sweep, NQ only
     python -m sep.transfer.sweep_summary --out-dir <cache_dir> \
-        [--pair-list slurm/inputs/pair_list.txt] [--n-target 1500]
+        --hparam lambda --datasets nq
+
+    # optional: [--pair-list slurm/inputs/pair_list.txt] [--n-target 1500]
 """
 import argparse
 import csv
@@ -29,6 +45,7 @@ import os
 import re
 
 from sep.transfer.transfer2 import (
+    _fmt_pow10,
     _load_json,
     _make_summary_fig,
     _model_tag,
@@ -45,54 +62,99 @@ from sep.transfer.transfer2 import (
     SURFACE,
 )
 
-_ALPHA_FILE_RE_TMPL = r'^probe_grid_align_{align_ds}_ridge_a1e(-?\d+)\.json$'
 
-_COMBOS = [(e, a) for e in ("nq", "squad") for a in ("nq", "squad")]
+# ============================================================================
+# Sweep-axis specs
+# ============================================================================
+# Each spec says how to (a) recognise a Phase-3 grid file for this axis and pull the
+# hyperparam value out of its name, (b) which curve in that file is the swept aligner,
+# and (c) how to name things in tables/figures.
+#
+# The trailing "(?:_.+)?" in both regexes matters: Phase 3 names a grid file after
+# EVERY aligner cache it found, so a run that has both a ridge and an e2_rstar cache
+# on disk emits "probe_grid_align_nq_ridge_a1e3_e2_rstar_l1e3.json". Without the
+# optional extra-tag group such files would be invisible to both axes.
+
+class _Spec:
+    def __init__(self, key, file_re_tmpl, parse, curve, aligner_label, sweep_label):
+        self.key = key                      # "alpha" | "lambda"
+        self.file_re_tmpl = file_re_tmpl    # format-string with {align_ds}
+        self.parse = parse                  # regex group 1 -> float value
+        self.curve = curve                  # curve key inside the grid json
+        self.aligner_label = aligner_label  # e.g. "ridge alpha"
+        self.sweep_label = sweep_label      # figure suptitle fragment
+
+    def file_re(self, align_ds):
+        return re.compile(self.file_re_tmpl.format(align_ds=re.escape(align_ds)))
+
+
+SPECS = {
+    "alpha": _Spec(
+        key="alpha",
+        file_re_tmpl=r'^probe_grid_align_{align_ds}_ridge_a1e(-?\d+)(?:_.+)?\.json$',
+        parse=lambda s: 10.0 ** int(s),
+        curve="curveB_ridge",
+        aligner_label="ridge alpha",
+        sweep_label="ridge alpha sweep",
+    ),
+    "lambda": _Spec(
+        key="lambda",
+        file_re_tmpl=r'^probe_grid_align_{align_ds}_(?:.+_)?e2_rstar_l([0-9.eE+-]+)\.json$',
+        parse=float,
+        curve="curveB_e2_rstar",
+        aligner_label="E2-R* lambda",
+        sweep_label="E2-R* lambda sweep",
+    ),
+}
+
+
+def _combos(datasets):
+    return [(e, a) for e in datasets for a in datasets]
 
 
 # ============================================================================
-# Reading per-alpha results
+# Reading per-value results
 # ============================================================================
 
-def collect_alpha_variants(pair_dir, align_ds):
-    """Return {alpha_exp: probe_grid dict} for every ridge-alpha file for this align_ds."""
+def collect_variants(pair_dir, align_ds, spec):
+    """Return {hp_value: probe_grid dict} for every swept file for this align_ds."""
     if not os.path.isdir(pair_dir):
         return {}
-    pattern = re.compile(_ALPHA_FILE_RE_TMPL.format(align_ds=re.escape(align_ds)))
+    pattern = spec.file_re(align_ds)
     variants = {}
     for fname in os.listdir(pair_dir):
         m = pattern.match(fname)
         if m:
-            variants[int(m.group(1))] = _load_json(os.path.join(pair_dir, fname))
+            variants[spec.parse(m.group(1))] = _load_json(os.path.join(pair_dir, fname))
     return variants
 
 
-def _auc_by_n(variants):
-    """Reshape {alpha_exp: pg} into {n: {alpha_exp: auc}}, dropping None entries."""
+def _auc_by_n(variants, spec):
+    """Reshape {hp: pg} into {n: {hp: auc}}, dropping None entries."""
     by_n = {}
-    for exp, pg in variants.items():
-        curve = pg.get("curveB_ridge")
+    for hp, pg in variants.items():
+        curve = pg.get(spec.curve)
         n_grid = pg.get("n_grid")
         if not curve or not n_grid:
             continue
         for n, v in zip(n_grid, curve):
             if v is not None:
-                by_n.setdefault(n, {})[exp] = v
+                by_n.setdefault(n, {})[hp] = v
     return by_n
 
 
-def rank_and_n_target(variants, n_target=1500):
-    """Compute the rank-aggregated best alpha and the best alpha at n=n_target.
+def rank_and_n_target(variants, spec, n_target=1500):
+    """Compute the rank-aggregated best value and the best value at n=n_target.
 
-    Ranking: at each n, alphas are ranked by AUROC (rank 1 = best). The winner is the
-    alpha with the lowest average rank across all n, ties broken by more per-n wins
-    then by smaller exponent. This is scale-free, so it is not distorted by the fact
+    Ranking: at each n, values are ranked by AUROC (rank 1 = best). The winner is the
+    value with the lowest average rank across all n, ties broken by more per-n wins
+    then by smaller value. This is scale-free, so it is not distorted by the fact
     that different n have different AUROC ranges/variance.
 
-    Returns {"best_rank": (exp, avg_rank, wins, n_compared) | None,
-             "best_n":    (exp, auc) | None}  or None if nothing usable.
+    Returns {"best_rank": (hp, avg_rank, wins, n_compared) | None,
+             "best_n":    (hp, auc) | None}  or None if nothing usable.
     """
-    by_n = _auc_by_n(variants)
+    by_n = _auc_by_n(variants, spec)
 
     best_n = None
     if n_target in by_n and by_n[n_target]:
@@ -101,24 +163,24 @@ def rank_and_n_target(variants, n_target=1500):
     if not by_n:
         return None if best_n is None else {"best_rank": None, "best_n": best_n}
 
-    exps = sorted(variants.keys())
-    rank_sum = {e: 0.0 for e in exps}
-    rank_cnt = {e: 0 for e in exps}
-    wins = {e: 0 for e in exps}
-    for auc_by_exp in by_n.values():
-        ranked = sorted(auc_by_exp.items(), key=lambda kv: kv[1], reverse=True)
-        for i, (exp, _) in enumerate(ranked):
-            rank_sum[exp] += i + 1
-            rank_cnt[exp] += 1
+    hps = sorted(variants.keys())
+    rank_sum = {h: 0.0 for h in hps}
+    rank_cnt = {h: 0 for h in hps}
+    wins = {h: 0 for h in hps}
+    for auc_by_hp in by_n.values():
+        ranked = sorted(auc_by_hp.items(), key=lambda kv: kv[1], reverse=True)
+        for i, (hp, _) in enumerate(ranked):
+            rank_sum[hp] += i + 1
+            rank_cnt[hp] += 1
         wins[ranked[0][0]] += 1
 
-    avg_rank = {e: rank_sum[e] / rank_cnt[e] for e in exps if rank_cnt[e] > 0}
+    avg_rank = {h: rank_sum[h] / rank_cnt[h] for h in hps if rank_cnt[h] > 0}
     if not avg_rank:
         return None if best_n is None else {"best_rank": None, "best_n": best_n}
 
-    best_exp = min(avg_rank, key=lambda e: (avg_rank[e], -wins[e], e))
+    best_hp = min(avg_rank, key=lambda h: (avg_rank[h], -wins[h], h))
     return {
-        "best_rank": (best_exp, avg_rank[best_exp], wins[best_exp], len(by_n)),
+        "best_rank": (best_hp, avg_rank[best_hp], wins[best_hp], len(by_n)),
         "best_n": best_n,
     }
 
@@ -150,15 +212,15 @@ def discover_pair_names(pair_list_path):
 def _fmt_n_cell(entry):
     if entry is None:
         return "-"
-    exp, auc = entry
-    return f"1e{exp} ({auc:.3f})"
+    hp, auc = entry
+    return f"{_fmt_pow10(hp)} ({auc:.3f})"
 
 
 def _fmt_rank_cell(entry):
     if entry is None:
         return "-"
-    exp, avg_rank, wins, n_total = entry
-    return f"1e{exp} (rank={avg_rank:.2f}, {wins}/{n_total} wins)"
+    hp, avg_rank, wins, n_total = entry
+    return f"{_fmt_pow10(hp)} (rank={avg_rank:.2f}, {wins}/{n_total} wins)"
 
 
 def _write_table(header, rows_of_vals, out_dir, stem):
@@ -179,38 +241,38 @@ def _write_table(header, rows_of_vals, out_dir, stem):
     return csv_path, md_path
 
 
-def build_rank_table(results_dir, pair_list_path, n_target=1500):
+def build_rank_table(results_dir, pair_list_path, spec, combos, n_target=1500):
     """rows: {"pair": name, "cells": {(eval_ds, align_ds, "rank"|"n"): entry_or_None}}"""
     rows = []
     for pair_name in discover_pair_names(pair_list_path):
         cells = {}
-        for eval_ds, align_ds in _COMBOS:
+        for eval_ds, align_ds in combos:
             pair_dir = os.path.join(results_dir, eval_ds, pair_name)
-            best = rank_and_n_target(collect_alpha_variants(pair_dir, align_ds),
-                                     n_target=n_target)
+            best = rank_and_n_target(collect_variants(pair_dir, align_ds, spec),
+                                     spec, n_target=n_target)
             cells[(eval_ds, align_ds, "rank")] = best["best_rank"] if best else None
             cells[(eval_ds, align_ds, "n")] = best["best_n"] if best else None
         rows.append({"pair": pair_name, "cells": cells})
     return rows
 
 
-def save_rank_table(rows, out_dir, n_target=1500):
+def save_rank_table(rows, out_dir, spec, combos, n_target=1500):
     header = ["pair"]
-    for eval_ds, align_ds in _COMBOS:
-        header.append(f"eval={eval_ds}/align={align_ds} best_alpha(avg_rank)")
-        header.append(f"eval={eval_ds}/align={align_ds} best_alpha(n={n_target})")
+    for eval_ds, align_ds in combos:
+        header.append(f"eval={eval_ds}/align={align_ds} best_{spec.key}(avg_rank)")
+        header.append(f"eval={eval_ds}/align={align_ds} best_{spec.key}(n={n_target})")
     vals_rows = []
     for row in rows:
         vals = [row["pair"]]
-        for eval_ds, align_ds in _COMBOS:
+        for eval_ds, align_ds in combos:
             vals.append(_fmt_rank_cell(row["cells"][(eval_ds, align_ds, "rank")]))
             vals.append(_fmt_n_cell(row["cells"][(eval_ds, align_ds, "n")]))
         vals_rows.append(vals)
-    return _write_table(header, vals_rows, out_dir, "hparam_alpha_table_rank")
+    return _write_table(header, vals_rows, out_dir, f"hparam_{spec.key}_table_rank")
 
 
-def build_per_n_table(results_dir, pair_list_path):
-    """Best alpha at every n, no aggregation.
+def build_per_n_table(results_dir, pair_list_path, spec, combos):
+    """Best value at every n, no aggregation.
 
     Returns (sorted n union, rows) with rows: {"pair", "cells": {(eval,align,n): entry}}
     """
@@ -218,65 +280,69 @@ def build_per_n_table(results_dir, pair_list_path):
     n_union = set()
     for pair_name in discover_pair_names(pair_list_path):
         cells = {}
-        for eval_ds, align_ds in _COMBOS:
+        for eval_ds, align_ds in combos:
             pair_dir = os.path.join(results_dir, eval_ds, pair_name)
-            for n, auc_by_exp in _auc_by_n(collect_alpha_variants(pair_dir, align_ds)).items():
+            variants = collect_variants(pair_dir, align_ds, spec)
+            for n, auc_by_hp in _auc_by_n(variants, spec).items():
                 n_union.add(n)
-                cells[(eval_ds, align_ds, n)] = max(auc_by_exp.items(),
+                cells[(eval_ds, align_ds, n)] = max(auc_by_hp.items(),
                                                     key=lambda kv: kv[1])
         rows.append({"pair": pair_name, "cells": cells})
     return sorted(n_union), rows
 
 
-def save_per_n_table(n_grid_union, rows, out_dir):
+def save_per_n_table(n_grid_union, rows, out_dir, spec, combos):
     header = ["pair"]
-    for eval_ds, align_ds in _COMBOS:
+    for eval_ds, align_ds in combos:
         for n in n_grid_union:
             header.append(f"eval={eval_ds}/align={align_ds} n={n}")
     vals_rows = []
     for row in rows:
         vals = [row["pair"]]
-        for eval_ds, align_ds in _COMBOS:
+        for eval_ds, align_ds in combos:
             for n in n_grid_union:
                 vals.append(_fmt_n_cell(row["cells"].get((eval_ds, align_ds, n))))
         vals_rows.append(vals)
-    return _write_table(header, vals_rows, out_dir, "hparam_alpha_table_per_n")
+    return _write_table(header, vals_rows, out_dir, f"hparam_{spec.key}_table_per_n")
 
 
 # ============================================================================
-# Best-alpha figure
+# Best-value figure
 # ============================================================================
 
-def make_best_alpha_selector(n_target=1500):
-    """Selector for _make_summary_fig: per (pair, align_ds), use that combo's best alpha."""
+def make_best_selector(spec, n_target=1500):
+    """Selector for _make_summary_fig: per (pair, align_ds), use that combo's best value."""
     def _select(pair_dir, ds_tag):
-        variants = collect_alpha_variants(pair_dir, ds_tag)
+        variants = collect_variants(pair_dir, ds_tag, spec)
         if not variants:
             return None
-        best = rank_and_n_target(variants, n_target=n_target)
+        best = rank_and_n_target(variants, spec, n_target=n_target)
         if not best or not best.get("best_rank"):
             return None
-        exp = best["best_rank"][0]
-        # Keep "alpha=1e<exp>" in the label: _make_summary_fig parses it back out to
-        # annotate each panel with the alpha that panel's curve actually used, which
-        # differs per (pair, align_ds) under this selector.
-        return f"ridge alpha=1e{exp} (best)", variants[exp]
+        hp = best["best_rank"][0]
+        # Keep the "<name>=<value>" spelling: _make_summary_fig's _hparams_from_label
+        # parses it back out to annotate each panel with the value that panel's curve
+        # actually used, which differs per (pair, align_ds) under this selector.
+        return f"{spec.aligner_label}={_fmt_pow10(hp)} (best)", variants[hp]
     return _select
 
 
-def save_best_alpha_figs(results_dir, out_dir, n_target=1500):
+def save_best_figs(results_dir, out_dir, spec, datasets, n_target=1500):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    selector = make_best_alpha_selector(n_target=n_target)
+    selector = make_best_selector(spec, n_target=n_target)
     saved = []
-    for eval_ds in ("nq", "squad"):
+    for eval_ds in datasets:
+        cross = [d for d in datasets if d != eval_ds]
         fig = _make_summary_fig(
             eval_ds, "probe_grid", results_dir, selector,
-            "ridge alpha: best per pair (avg rank across n; per-panel alpha in titles)",
+            f"{spec.aligner_label}: best per pair "
+            f"(avg rank across n; per-panel value in titles)",
+            cross_datasets=cross,
         )
-        stem = f"summary_{eval_ds}_probe_grid_alpha_best"
+        stem = f"summary_{eval_ds}_probe_grid_{spec.key}_best"
         for ext in ("pdf", "png"):
             path = os.path.join(out_dir, f"{stem}.{ext}")
             fig.savefig(path, format=ext, dpi=200 if ext == "pdf" else 150,
@@ -287,26 +353,26 @@ def save_best_alpha_figs(results_dir, out_dir, n_target=1500):
 
 
 # ============================================================================
-# All-alpha figures (one per alignment dataset)
+# All-value figures (one per alignment dataset)
 # ============================================================================
 
-# Sequential ramp: low alpha (weak regularization) -> light, high alpha -> dark.
-# A sequential scale is the right encoding here because alpha is ordinal, so the
-# reader should be able to see monotone trends without consulting the legend.
-_ALPHA_RAMP = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08519c", "#04306b"]
+# Sequential ramp: weak regularization -> light, strong -> dark. A sequential scale is
+# the right encoding here because the hyperparam is ordinal, so the reader should be
+# able to see monotone trends without consulting the legend.
+_HP_RAMP = ["#c6dbef", "#9ecae1", "#6baed6", "#3182bd", "#08519c", "#04306b"]
 
 
-def _alpha_color(exp, all_exps):
-    i = sorted(all_exps).index(exp)
-    span = max(len(all_exps) - 1, 1)
-    return _ALPHA_RAMP[round(i / span * (len(_ALPHA_RAMP) - 1))]
+def _hp_color(hp, all_hps):
+    i = sorted(all_hps).index(hp)
+    span = max(len(all_hps) - 1, 1)
+    return _HP_RAMP[round(i / span * (len(_HP_RAMP) - 1))]
 
 
-def make_alpha_curves_fig(eval_ds, align_ds, results_dir, n_target=1500):
-    """Grid figure: for each pair, one curve per ridge alpha for a single align_ds.
+def make_hp_curves_fig(eval_ds, align_ds, results_dir, spec, n_target=1500):
+    """Grid figure: for each pair, one curve per swept value for a single align_ds.
 
-    Complements the best-alpha figure: that one answers "which alpha wins", this one
-    answers "how much does alpha matter, and is the response monotone".
+    Complements the best-value figure: that one answers "which value wins", this one
+    answers "how much does the hyperparam matter, and is the response monotone".
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -328,23 +394,23 @@ def make_alpha_curves_fig(eval_ds, align_ds, results_dir, n_target=1500):
         _SHORT.get(src, src) for src, _ in _LLAMA_FAMILY
     ]
 
-    # Global alpha set so colors and legend entries mean the same thing in every panel.
-    all_exps = set()
+    # Global value set so colors and legend entries mean the same thing in every panel.
+    all_hps = set()
     for row in grid:
         for pair_key in row:
             if pair_key:
-                all_exps |= set(collect_alpha_variants(
-                    os.path.join(results_dir, eval_ds, pair_key), align_ds))
-    all_exps = sorted(all_exps)
+                all_hps |= set(collect_variants(
+                    os.path.join(results_dir, eval_ds, pair_key), align_ds, spec))
+    all_hps = sorted(all_hps)
 
     kind_lbl = "same-align" if align_ds == eval_ds else "cross-align"
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 3.5),
                              facecolor=SURFACE, constrained_layout=True)
     fig.suptitle(
-        f"SE probe transfer — ridge alpha sweep  |  eval: {eval_ds.upper()}  |  "
+        f"SE probe transfer — {spec.sweep_label}  |  eval: {eval_ds.upper()}  |  "
         f"align: {align_ds.upper()} ({kind_lbl})  |  "
-        f"one curve per alpha (light = weak reg. → dark = strong)  |  "
-        f"best alpha by avg rank marked ★",
+        f"one curve per value (light = weak reg. → dark = strong)  |  "
+        f"best by avg rank marked ★",
         fontsize=11, color=INK_PRI,
     )
 
@@ -386,21 +452,21 @@ def make_alpha_curves_fig(eval_ds, align_ds, results_dir, n_target=1500):
                         color=C_SRC_BASE, linewidth=1.5, marker="D", markersize=4,
                         markeredgewidth=0, label="A: source probe on src", zorder=4)
 
-            variants = collect_alpha_variants(pair_dir, align_ds)
-            best = rank_and_n_target(variants, n_target=n_target) if variants else None
-            best_exp = best["best_rank"][0] if best and best.get("best_rank") else None
+            variants = collect_variants(pair_dir, align_ds, spec)
+            best = rank_and_n_target(variants, spec, n_target=n_target) if variants else None
+            best_hp = best["best_rank"][0] if best and best.get("best_rank") else None
 
-            for exp in sorted(variants):
-                pg = variants[exp]
-                curve = pg.get("curveB_ridge")
+            for hp in sorted(variants):
+                pg = variants[hp]
+                curve = pg.get(spec.curve)
                 if not curve:
                     continue
-                is_best = exp == best_exp
-                ax.plot(pg["n_grid"], curve, color=_alpha_color(exp, all_exps),
+                is_best = hp == best_hp
+                ax.plot(pg["n_grid"], curve, color=_hp_color(hp, all_hps),
                         linewidth=2.0 if is_best else 1.2,
                         marker="*" if is_best else "s",
                         markersize=9 if is_best else 3.5, markeredgewidth=0,
-                        label=f"B: alpha=1e{exp}" + (" ★" if is_best else ""),
+                        label=f"B: {spec.key}={_fmt_pow10(hp)}" + (" ★" if is_best else ""),
                         zorder=3)
 
             ax.set_xscale("log")
@@ -423,17 +489,17 @@ def make_alpha_curves_fig(eval_ds, align_ds, results_dir, n_target=1500):
     return fig
 
 
-def save_alpha_curves_figs(results_dir, out_dir, n_target=1500):
+def save_hp_curves_figs(results_dir, out_dir, spec, datasets, n_target=1500):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     saved = []
-    for eval_ds in ("nq", "squad"):
-        for align_ds in ("nq", "squad"):
-            fig = make_alpha_curves_fig(eval_ds, align_ds, results_dir,
-                                        n_target=n_target)
-            stem = f"alpha_curves_{eval_ds}_align_{align_ds}"
+    for eval_ds in datasets:
+        for align_ds in datasets:
+            fig = make_hp_curves_fig(eval_ds, align_ds, results_dir, spec,
+                                     n_target=n_target)
+            stem = f"{spec.key}_curves_{eval_ds}_align_{align_ds}"
             for ext in ("pdf", "png"):
                 path = os.path.join(out_dir, f"{stem}.{ext}")
                 fig.savefig(path, format=ext, dpi=200 if ext == "pdf" else 150,
@@ -449,13 +515,22 @@ def save_alpha_curves_figs(results_dir, out_dir, n_target=1500):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Cross-alpha sweep summary (run once after a sweep finishes)")
+        description="Cross-hyperparam sweep summary (run once after a sweep finishes)")
     p.add_argument("--out-dir", required=True, help="root cache/results directory")
+    p.add_argument("--hparam", default="alpha", choices=sorted(SPECS),
+                   help="which sweep axis to summarise: alpha (ridge) or lambda (E2-R*)")
+    p.add_argument("--datasets", nargs="+", default=["nq", "squad"],
+                   help="datasets to report; combos are the cross product "
+                        "(use a single dataset for a same-align-only sweep)")
     p.add_argument("--pair-list", default=None,
                    help="defaults to <repo>/slurm/inputs/pair_list.txt")
     p.add_argument("--n-target", type=int, default=1500,
-                   help="n at which the 'best alpha at n' column is computed")
+                   help="n at which the 'best value at n' column is computed")
     args = p.parse_args()
+
+    spec = SPECS[args.hparam]
+    datasets = list(args.datasets)
+    combos = _combos(datasets)
 
     results_dir = os.path.join(args.out_dir, "results")
     out_dir = os.path.join(args.out_dir, "sweep_summary")
@@ -466,23 +541,27 @@ def main():
     if not os.path.exists(pair_list):
         raise SystemExit(f"pair_list not found: {pair_list}")
 
-    rank_rows = build_rank_table(results_dir, pair_list, n_target=args.n_target)
+    rank_rows = build_rank_table(results_dir, pair_list, spec, combos,
+                                 n_target=args.n_target)
     if not any(v is not None for r in rank_rows for v in r["cells"].values()):
         raise SystemExit(
-            "No per-alpha probe_grid files found under "
-            f"{results_dir}. Run phases 2-3 for at least one alpha first.")
+            f"No per-{spec.key} probe_grid files found under "
+            f"{results_dir}. Run phases 2-3 for at least one {spec.key} first.")
 
-    for path in save_rank_table(rank_rows, out_dir, n_target=args.n_target):
+    for path in save_rank_table(rank_rows, out_dir, spec, combos,
+                                n_target=args.n_target):
         print(f"Saved: {path}")
 
-    n_union, per_n_rows = build_per_n_table(results_dir, pair_list)
-    for path in save_per_n_table(n_union, per_n_rows, out_dir):
+    n_union, per_n_rows = build_per_n_table(results_dir, pair_list, spec, combos)
+    for path in save_per_n_table(n_union, per_n_rows, out_dir, spec, combos):
         print(f"Saved: {path}")
 
-    for path in save_best_alpha_figs(results_dir, out_dir, n_target=args.n_target):
+    for path in save_best_figs(results_dir, out_dir, spec, datasets,
+                               n_target=args.n_target):
         print(f"Saved: {path}")
 
-    for path in save_alpha_curves_figs(results_dir, out_dir, n_target=args.n_target):
+    for path in save_hp_curves_figs(results_dir, out_dir, spec, datasets,
+                                    n_target=args.n_target):
         print(f"Saved: {path}")
 
 

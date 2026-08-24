@@ -22,6 +22,7 @@ Or run all phases via the shell wrapper slurm/run_transfer_v2.sh.
 import argparse
 import glob
 import json
+import math
 import os
 import pickle
 import re
@@ -221,6 +222,22 @@ def _load_json(path):
         return json.load(f)
 
 
+def _fmt_pow10(s):
+    """1000.0 / '1000.0' -> '1e3';  2500 -> '2500'. Swept values are usually 10^k.
+
+    Used both to build the e2_rstar tag and to read a value back out of a label.
+    """
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return s
+    if v > 0:
+        e = math.log10(v)
+        if abs(e - round(e)) < 1e-9:
+            return f"1e{int(round(e))}"
+    return f"{v:g}"
+
+
 def _aligner_tag(aligner, hyperparams=None):
     """Return a short tag encoding aligner + hyperparams.
 
@@ -228,6 +245,7 @@ def _aligner_tag(aligner, hyperparams=None):
     Each aligner defines its own relevant params:
       ridge      -> {"alpha": 1e3}      -> "ridge_a1e3"
       procrustes -> {}                  -> "procrustes"
+      e2_rstar   -> {"lambda_val": 1e3} -> "e2_rstar_l1e3"
       e2_rstar   -> {"lambda_val": 0.5} -> "e2_rstar_l0.5"
     """
     if not hyperparams:
@@ -237,7 +255,9 @@ def _aligner_tag(aligner, hyperparams=None):
         exp = int(round(np.log10(hyperparams["alpha"])))
         parts.append(f"a1e{exp}")
     elif aligner == "e2_rstar" and "lambda_val" in hyperparams:
-        parts.append(f"l{hyperparams['lambda_val']}")
+        # Powers of ten collapse to 1e3 rather than argparse's float repr 1000.0,
+        # matching the ridge tag. Non-powers keep a plain %g form (0.5, 2500).
+        parts.append(f"l{_fmt_pow10(hyperparams['lambda_val'])}")
     else:
         for k, v in hyperparams.items():
             parts.append(f"{k}{v}")
@@ -578,14 +598,31 @@ def phase_align_cache(args):
 
         # Z-score using pool stats from probe cache (same 1500-example stats used
         # in Phase 3 evaluation) so M is fit and applied in the same coordinate system.
-        N_align = Xs_align.shape[0]
+        N_align_rows = Xs_align.shape[0]
         mu_sa = np.array(src_align_cache["mu"])
         sd_sa = np.array(src_align_cache["sd"])
         mu_ta = np.array(tgt_align_cache["mu"])
         sd_ta = np.array(tgt_align_cache["sd"])
         Zs_align = (Xs_align - mu_sa) / sd_sa
         Zt_align = (Xt_align - mu_ta) / sd_ta
-        align_all = np.arange(N_align)
+        # Rows the alignment may be fit on.  MUST exclude the Phase-3 eval rows: the
+        # eval set is the probe cache's random eval_idx, and `pool` is its complement,
+        # so pool is the only leak-free choice.  Taking np.arange(N_align) instead (the
+        # first n rows in file order) overlaps eval_idx in n*n_eval/N rows -- 375 of 500
+        # at n=1500 for NQ -- which for e2_rstar is a hard label leak, since it regresses
+        # ent_t and the eval label is a binarization of that same ent_t (AUROC 0.95 vs
+        # 0.74 leak-free).  This matches transfer.py:512's `sub = pool[:n]`.
+        #
+        # Only same-align can overlap: for align_ds != eval_ds the alignment rows are a
+        # different dataset's questions, and eval_ds's pool indices are meaningless in
+        # that row space, so the full range is both correct and safe there.
+        if align_ds == eval_ds:
+            align_all = np.array(src_cache["pool"])
+        else:
+            align_all = np.arange(N_align_rows)
+        # N_align is the number of USABLE alignment rows (Phase 3 caps its grid with it),
+        # which is now pool size, not the dataset row count.
+        N_align = len(align_all)
 
         valid_grid = [n for n in n_grid if n <= N_align]
 
@@ -991,7 +1028,7 @@ def make_run_variant_selector(grid_type, hyperparams):
     """Selector for phase_summary: pick the grid file matching THIS run's hyperparams.
 
     A probe_grid filename is  <grid_type>_align_<ds>_<tag1>[_<tag2>...].json  where each
-    tag encodes one aligner + its hyperparams (e.g. "ridge_a1e4", "procrustes", "e2_rstar_l1.0").
+    tag encodes one aligner + its hyperparams (e.g. "ridge_a1e4", "procrustes", "e2_rstar_l1e3").
     A file belongs to the current run iff every hyperparam-bearing tag in it matches the
     tag implied by the current args (so a ridge_a1e1 file is rejected when alpha=1e4).
 
@@ -1012,7 +1049,8 @@ def make_run_variant_selector(grid_type, hyperparams):
             m = re.search(r'ridge_a1e-?\d+', suffix)
             if m and m.group(0) != expected_ridge:
                 continue
-            m = re.search(r'e2_rstar_l[\d.]+', suffix)
+            # [0-9.eE+-], not [\d.]: the tag is 1e3-style, not 1000.0-style
+            m = re.search(r'e2_rstar_l[0-9.eE+-]+', suffix)
             if m and m.group(0) != expected_e2:
                 continue
             return suffix, _load_json(os.path.join(pair_dir, fname))
@@ -1021,16 +1059,34 @@ def make_run_variant_selector(grid_type, hyperparams):
     return _select
 
 
-def _alpha_from_label(label):
-    """Pull '1e4' out of an aligner label like 'ridge_a1e4' / 'ridge α=1e4 (best)'.
+# Symbols in the order they are annotated on panel titles.
+_HPARAM_SYMBOLS = ["α", "λ"]
 
-    Returns None when the label carries no alpha (or there is no label at all), so
-    callers can skip the annotation instead of printing a bogus value.
+
+def _hparams_from_label(label):
+    """Pull the swept hyperparams out of an aligner label, as {symbol: value_str}.
+
+    Handles both label flavours in use:
+      * Phase 4 passes the grid-file suffix, e.g. 'ridge_a1e4_e2_rstar_l1000.0'
+      * sweep_summary passes a prose label, e.g. 'ridge alpha=1e4 (best)' or
+        'E2-R* lambda=1e5 (best)'
+
+    Returns {} when the label carries no recognised hyperparam (or there is no label
+    at all), so callers can skip the annotation instead of printing a bogus value.
     """
+    out = {}
     if not label:
-        return None
-    m = re.search(r'a(?:lpha)?[=_]?\s*(1e-?\d+)', label)
-    return m.group(1) if m else None
+        return out
+    # The lookbehind keeps the alpha pattern from firing on the trailing 'a' of
+    # 'lambda=1e5', which would report that lambda as an alpha.
+    m = re.search(r'(?<![A-Za-z])a(?:lpha)?[=_]?\s*(1e-?\d+)', label)
+    if m:
+        out["α"] = m.group(1)
+    m = re.search(r'(?:e2_rstar_l|lambda[=_]?\s*|λ[=_]?\s*)'
+                  r'([0-9]+(?:\.[0-9]*)?(?:[eE][+-]?\d+)?)', label)
+    if m:
+        out["λ"] = _fmt_pow10(m.group(1))
+    return out
 
 
 def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_note,
@@ -1156,18 +1212,23 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
             ax.set_xticklabels([str(v) for v in g], fontsize=6.5, rotation=30)
             ax.set_ylim(0.45, 0.95)
             ax.yaxis.set_major_locator(ticker.MultipleLocator(0.05))
-            # Which alpha each of the two B-curves came from. With a fixed-alpha
-            # selector this is the same everywhere; with sweep_summary's best-alpha
-            # selector it varies per panel, so it has to be shown per panel.
-            alpha_note = ""
-            same_a = _alpha_from_label(same_pick[0] if same_pick else None)
+            # Which hyperparams each of the two B-curves came from (α for ridge, λ for
+            # E2-R*). With a fixed-hyperparam selector this is the same everywhere; with
+            # sweep_summary's best-value selector it varies per panel, so it has to be
+            # shown per panel. Only symbols actually present in a label are annotated.
+            same_hp = _hparams_from_label(same_pick[0] if same_pick else None)
             first_cross = next((p for _, p in cross_picks if p is not None), None)
-            cross_a = _alpha_from_label(first_cross[0] if first_cross else None)
-            if same_a or cross_a:
-                alpha_note = (f"  α: {ds_label}={same_a or '-'}, "
-                              f"{cross_label}={cross_a or '-'}")
+            cross_hp = _hparams_from_label(first_cross[0] if first_cross else None)
+            notes = []
+            for sym in _HPARAM_SYMBOLS:
+                if sym in same_hp or sym in cross_hp:
+                    parts = [f"{ds_label}={same_hp.get(sym, '-')}"]
+                    if cross_label:
+                        parts.append(f"{cross_label}={cross_hp.get(sym, '-')}")
+                    notes.append(f"{sym}: " + ", ".join(parts))
+            hp_note = ("  " + "  ".join(notes)) if notes else ""
 
-            ax.set_title(f"→ {tgt_short}\n[{kind}]  ceil={ceiling:.3f}{alpha_note}",
+            ax.set_title(f"→ {tgt_short}\n[{kind}]  ceil={ceiling:.3f}{hp_note}",
                          fontsize=7.5, color=INK_PRI, pad=3)
             ax.legend(fontsize=5.5, frameon=True, framealpha=0.9,
                       edgecolor="#cccccc", loc="upper left")

@@ -1,9 +1,13 @@
 #!/bin/bash
 # Alpha ablation sweep for ridge alignment. Self-contained: runs every phase.
 #
-# Phase 1 (probe_cache) is alpha-independent and runs once up front. It skips any
-# (model, dataset) whose probes/<ds>/<model>.pkl already exists, so running
-# run_transfer_v2.sh first is harmless -- this just picks up its cache.
+# NQ only, same-align only (no --cross-align-dataset), to match the E2-R* lambda sweep.
+# Writes to the leak-free dir transfer_v2_pooled/ (alignment fit on `pool`, disjoint from
+# the eval rows). The old leaky results stay under transfer_v2/. Override OUT=...
+#
+# Phase 1 (probe_cache) is alpha-independent and runs once up front. The bootstrap step
+# copies the existing probe caches in, so it is a no-op that prints "skip" per model --
+# see slurm/bootstrap_pooled_outdir.sh for why they must be copied, not refit.
 #
 # Then, per alpha:  Phase 2 (align_cache) -> Phase 3 (evaluate) -> Phase 4 (summary)
 #   Each alpha is carried end-to-end before the next one starts, so partial
@@ -14,7 +18,7 @@
 #
 # Usage:
 #   nohup bash slurm/run_transfer_alpha_sweep.sh \
-#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/run_alpha_sweep.log 2>&1 &
+#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled/run_alpha_sweep.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,11 +41,13 @@ check_branch() {
     fi
 }
 
-OUT=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2
+OUT=${OUT:-/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled}
 PAIR_LIST=$REPO_ROOT/slurm/inputs/pair_list.txt
 MODEL_PATHS=$REPO_ROOT/slurm/inputs/model_paths.txt
 BASE_ARGS="--out-dir $OUT --token slt --n-grid 50 100 200 400 800 1500 --n-eval 500 --seed 0"
-PAIR_ARGS="--datasets squad nq --cross-align-dataset squad:nq nq:squad"
+PAIR_ARGS="--datasets nq"
+
+OUT_NEW="$OUT" bash slurm/bootstrap_pooled_outdir.sh
 
 echo "=========================================="
 echo "Phase 1: probe_cache (alpha-independent)  $(date '+%H:%M:%S')"
@@ -83,10 +89,10 @@ check_branch
 echo "=========================================="
 echo "Sweep summary: cross-alpha comparison  $(date '+%H:%M:%S')"
 echo "=========================================="
-# NB: sweep_summary takes only --out-dir/--pair-list/--n-target. Its eval_ds x
-# align_ds combos are hardcoded (nq/squad), so $PAIR_ARGS must not be passed.
+# NB: sweep_summary has its own flags (--hparam/--datasets/--pair-list/--n-target),
+# so $PAIR_ARGS must not be passed. --datasets nq keeps it to the (nq, nq) combo.
 python -m sep.transfer.sweep_summary \
-    --out-dir "$OUT"
+    --out-dir "$OUT" --hparam alpha --datasets nq
 
 echo ""
 echo "All alphas complete.  $(date '+%H:%M:%S')"
