@@ -11,9 +11,15 @@
 # Writes to the leak-free dir transfer_v2_pooled/ (alignment fit on `pool`, disjoint from
 # the eval rows). The old leaky results stay under transfer_v2/. Override OUT=...
 #
+# Overridable: OUT, ALPHA (ridge alpha, default 1e3), DATASETS, SUMMARY_DATASETS.
+#
 # Usage:
 #   nohup bash slurm/run_transfer_v2.sh \
 #     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled/run.log 2>&1 &
+#
+#   # squad only, ridge alpha=1e4:
+#   ALPHA=1e4 DATASETS=squad nohup bash slurm/run_transfer_v2.sh \
+#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled/run_squad_a1e4.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,7 +28,8 @@ cd "$REPO_ROOT"
 export WANDB_MODE=offline
 
 OUT=${OUT:-/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled}
-COMMON="--out-dir $OUT --token slt --n-grid 50 100 200 400 800 1500 --n-eval 500 --seed 0 --alpha 1e3"
+ALPHA=${ALPHA:-1e3}
+COMMON="--out-dir $OUT --token slt --n-grid 50 100 200 400 800 1500 --n-eval 500 --seed 0 --alpha $ALPHA"
 # Same-align only. The cross-align combos are unaffected by the align_all fix, so
 # recomputing them here would only be a consistency check -- add back
 # `--cross-align-dataset squad:nq nq:squad` if you want them in this out dir.

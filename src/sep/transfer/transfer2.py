@@ -759,7 +759,7 @@ def phase_evaluate(args):
         hyperparams = _build_hyperparams(args)
         available_aligners = []
         align_caches = {}
-        for a in ["ridge", "procrustes", "e2_rstar"]:
+        for a in args.aligners:
             tag = _aligner_tag(a, hyperparams.get(a, {}))
             p = os.path.join(pair_align_dir, f"align_{align_ds}_{tag}.pkl")
             if os.path.exists(p):
@@ -1375,6 +1375,13 @@ def main():
     _common_args(p3)
     p3.add_argument("--pair-list",
                     default=os.path.join(_repo_root(), "slurm", "inputs", "pair_list.txt"))
+    # Which aligners to CONSIDER. Phase 3 still only uses the ones whose cache exists, so
+    # the default (all three) reproduces the previous unconditional scan. Narrow it to keep
+    # an unrelated aligner's cache out of the run: its tag would otherwise be appended to
+    # the output filename (probe_grid_align_nq_ridge_a1e3_e2_rstar_l1e5.json).
+    p3.add_argument("--aligners", nargs="+", default=["ridge", "procrustes", "e2_rstar"],
+                    choices=["ridge", "procrustes", "e2_rstar"],
+                    help="alignment methods to evaluate (default: all that have a cache)")
 
     p4 = sub.add_parser("summary", help="Phase 4: plot summary figures for THIS run's hyperparams")
     _common_args(p4)
