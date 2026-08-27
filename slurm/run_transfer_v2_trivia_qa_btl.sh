@@ -29,12 +29,17 @@ PAIR_ARGS="--datasets trivia_qa --cross-align-dataset trivia_qa:nq trivia_qa:squ
 
 mkdir -p "$OUT"
 
-echo "=========================================="
-echo "Phase 1: probe cache  $(date '+%H:%M:%S')"
-echo "=========================================="
-# Fits probes at each model's best layer (same as best-to-best; transfer-mode is ignored here).
-$PYTHON -m sep.transfer.transfer2 probe_cache \
-    $COMMON $PAIR_ARGS
+# Phase 1 (probe_cache) is transfer-mode-independent: it only fits probes at the
+# best layer and records gen_path + pool/eval_idx splits.  The last-layer native
+# target probe is fit on-the-fly in Phase 3 from the raw hidden states via gen_path.
+# Reuse the existing caches from the best-to-best run — no need to refit anything.
+BTB=/build_bak/UQ/UQ-transfer/sep_scratch/transfer_v2_trivia_qa
+if [ ! -e "$OUT/probes" ]; then
+    ln -s "$BTB/probes" "$OUT/probes"
+    echo "Symlinked probes/ from $BTB"
+else
+    echo "probes/ already present, skipping symlink"
+fi
 
 echo "=========================================="
 echo "Phase 2: alignment cache  $(date '+%H:%M:%S')"
