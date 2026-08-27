@@ -89,13 +89,15 @@ def compute_venn(native_preds, align_preds, n_grid, aligner="ridge"):
     return {"n_grid": n_grid, "by_n": by_n}
 
 
-def process_pair(pair_dir, eval_ds, results, aligner_suffix=None, verbose=True):
+def process_pair(pair_dir, eval_ds, results, aligner_suffix=None, verbose=True,
+                 mode_sfx=""):
     """Compute venn stats for one pair.
 
     aligner_suffix: if given (e.g. "ridge_a1e4"), only the prediction file for that
     aligner+hyperparam combo is processed; otherwise every combo on disk is.
+    mode_sfx: filename infix for non-default transfer modes (e.g. "_btl").
     """
-    native_preds_path = os.path.join(pair_dir, f"native_preds_{eval_ds}.json")
+    native_preds_path = os.path.join(pair_dir, f"native_preds{mode_sfx}_{eval_ds}.json")
     if not os.path.exists(native_preds_path):
         if verbose:
             print(f"  skip (no native_preds): {pair_dir}")
@@ -103,18 +105,19 @@ def process_pair(pair_dir, eval_ds, results, aligner_suffix=None, verbose=True):
 
     native_preds = _load_json(native_preds_path)
 
-    # find all predictions_align_*.json files
+    pred_prefix = f"predictions{mode_sfx}_align_"
+    # find all predictions[mode_sfx]_align_*.json files
     align_files = sorted(
         f for f in os.listdir(pair_dir)
-        if f.startswith("predictions_align_") and f.endswith(".json")
+        if f.startswith(pred_prefix) and f.endswith(".json")
     )
     if aligner_suffix is not None:
         align_files = [f for f in align_files
                        if f.endswith(f"_{aligner_suffix}.json")]
 
     for fname in align_files:
-        # filename: predictions_align_<align_ds>_<aligner_suffix>.json
-        stem = fname[len("predictions_align_"):-len(".json")]
+        # filename: predictions[mode_sfx]_align_<align_ds>_<aligner_suffix>.json
+        stem = fname[len(pred_prefix):-len(".json")]
         # Use the known aligner_suffix parameter to correctly split off align_ds,
         # handling dataset names that contain underscores (e.g. "trivia_qa").
         if aligner_suffix is not None and stem.endswith(f"_{aligner_suffix}"):
@@ -139,10 +142,12 @@ def process_pair(pair_dir, eval_ds, results, aligner_suffix=None, verbose=True):
             print(f"  saved: {out_path}")
 
 
-def compute_all(out_dir, eval_datasets=("nq", "squad"), aligner_suffix=None, verbose=True):
+def compute_all(out_dir, eval_datasets=("nq", "squad"), aligner_suffix=None, verbose=True,
+                mode_sfx=""):
     """Compute venn stats for every pair. Returns list of written paths.
 
     aligner_suffix restricts the work to one aligner+hyperparam combo (see process_pair).
+    mode_sfx: filename infix for non-default transfer modes (e.g. "_btl").
     """
     results_dir = os.path.join(out_dir, "results")
     saved = []
@@ -160,7 +165,8 @@ def compute_all(out_dir, eval_datasets=("nq", "squad"), aligner_suffix=None, ver
             if verbose:
                 print(f"  {pair}")
             process_pair(pair_dir, eval_ds, saved,
-                         aligner_suffix=aligner_suffix, verbose=verbose)
+                         aligner_suffix=aligner_suffix, verbose=verbose,
+                         mode_sfx=mode_sfx)
     return saved
 
 

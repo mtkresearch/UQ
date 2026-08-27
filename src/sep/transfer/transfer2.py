@@ -273,6 +273,18 @@ def _build_hyperparams(args):
     }
 
 
+def _tgt_layer(tc, transfer_mode):
+    """Return the target layer index to use for alignment and evaluation."""
+    if transfer_mode == "best-to-last":
+        return len(tc["layer_aucs"]) - 1
+    return tc["best_layer"]
+
+
+def _mode_suffix(transfer_mode):
+    """Short filename suffix that distinguishes non-default transfer modes."""
+    return "_btl" if transfer_mode == "best-to-last" else ""
+
+
 def _load_timing(out_dir):
     path = os.path.join(out_dir, "timing.json")
     if os.path.exists(path):
@@ -536,8 +548,9 @@ def phase_align_cache(args):
         hyperparams = _build_hyperparams(args)
         aligner_tags = {a: _aligner_tag(a, hyperparams.get(a, {}))
                         for a in args.aligners}
+        mode_sfx = _mode_suffix(args.transfer_mode)
         aligner_out_paths = {
-            a: os.path.join(pair_align_dir, f"align_{align_ds}_{aligner_tags[a]}.pkl")
+            a: os.path.join(pair_align_dir, f"align_{align_ds}_{aligner_tags[a]}{mode_sfx}.pkl")
             for a in args.aligners
         }
         pending = [a for a in args.aligners
@@ -561,7 +574,7 @@ def phase_align_cache(args):
             tgt_cache = pickle.load(f)
 
         Ls = src_cache["best_layer"]
-        Lt = tgt_cache["best_layer"]
+        Lt = _tgt_layer(tgt_cache, args.transfer_mode)
 
         print(f"\n[align_cache {prog}] {pair_name}  eval={eval_ds}  align={align_ds}")
         print(f"  src best layer: {Ls}  tgt best layer: {Lt}")
@@ -596,15 +609,6 @@ def phase_align_cache(args):
         Xs_align = H_src_align[Ls].astype(np.float64)
         Xt_align = H_tgt_align[Lt].astype(np.float64)
 
-        # Z-score using pool stats from probe cache (same 1500-example stats used
-        # in Phase 3 evaluation) so M is fit and applied in the same coordinate system.
-        N_align_rows = Xs_align.shape[0]
-        mu_sa = np.array(src_align_cache["mu"])
-        sd_sa = np.array(src_align_cache["sd"])
-        mu_ta = np.array(tgt_align_cache["mu"])
-        sd_ta = np.array(tgt_align_cache["sd"])
-        Zs_align = (Xs_align - mu_sa) / sd_sa
-        Zt_align = (Xt_align - mu_ta) / sd_ta
         # Rows the alignment may be fit on.  MUST exclude the Phase-3 eval rows: the
         # eval set is the probe cache's random eval_idx, and `pool` is its complement,
         # so pool is the only leak-free choice.  Taking np.arange(N_align) instead (the
@@ -616,6 +620,7 @@ def phase_align_cache(args):
         # Only same-align can overlap: for align_ds != eval_ds the alignment rows are a
         # different dataset's questions, and eval_ds's pool indices are meaningless in
         # that row space, so the full range is both correct and safe there.
+        N_align_rows = Xs_align.shape[0]
         if align_ds == eval_ds:
             align_all = np.array(src_cache["pool"])
         else:
@@ -623,6 +628,19 @@ def phase_align_cache(args):
         # N_align is the number of USABLE alignment rows (Phase 3 caps its grid with it),
         # which is now pool size, not the dataset row count.
         N_align = len(align_all)
+
+        # Z-score using pool stats from probe cache (same 1500-example stats as Phase 3).
+        # For best-to-last the stored stats are for the best layer, so recompute at Lt.
+        mu_sa = np.array(src_align_cache["mu"])
+        sd_sa = np.array(src_align_cache["sd"])
+        if args.transfer_mode == "best-to-last":
+            mu_ta = Xt_align[align_all].mean(0)
+            sd_ta = Xt_align[align_all].std(0) + 1e-6
+        else:
+            mu_ta = np.array(tgt_align_cache["mu"])
+            sd_ta = np.array(tgt_align_cache["sd"])
+        Zs_align = (Xs_align - mu_sa) / sd_sa
+        Zt_align = (Xt_align - mu_ta) / sd_ta
 
         valid_grid = [n for n in n_grid if n <= N_align]
 
@@ -757,11 +775,12 @@ def phase_evaluate(args):
         # Load alignment caches — one file per aligner+hyperparam combo
         pair_align_dir = os.path.join(args.out_dir, "alignments", eval_ds, pair_name)
         hyperparams = _build_hyperparams(args)
+        mode_sfx = _mode_suffix(args.transfer_mode)
         available_aligners = []
         align_caches = {}
         for a in args.aligners:
             tag = _aligner_tag(a, hyperparams.get(a, {}))
-            p = os.path.join(pair_align_dir, f"align_{align_ds}_{tag}.pkl")
+            p = os.path.join(pair_align_dir, f"align_{align_ds}_{tag}{mode_sfx}.pkl")
             if os.path.exists(p):
                 with open(p, "rb") as f:
                     align_caches[a] = pickle.load(f)
@@ -779,7 +798,7 @@ def phase_evaluate(args):
         order = _align_ids(ids_src, ids_tgt)
         H_tgt = H_tgt[:, order]
 
-        Ls, Lt = sc["best_layer"], tc["best_layer"]
+        Ls, Lt = sc["best_layer"], _tgt_layer(tc, args.transfer_mode)
         eval_idx = np.array(sc["eval_idx"])
         pool = np.array(sc["pool"])
         ys = np.array(sc["y"])
@@ -787,11 +806,16 @@ def phase_evaluate(args):
 
         mu_s = np.array(sc["mu"])
         sd_s = np.array(sc["sd"])
-        mu_t = np.array(tc["mu"])
-        sd_t = np.array(tc["sd"])
 
         Xs = H_src[Ls].astype(np.float64)
         Xt = H_tgt[Lt].astype(np.float64)
+        # For best-to-last the stored stats are for the best layer; recompute at Lt.
+        if args.transfer_mode == "best-to-last":
+            mu_t = Xt[pool].mean(0)
+            sd_t = Xt[pool].std(0) + 1e-6
+        else:
+            mu_t = np.array(tc["mu"])
+            sd_t = np.array(tc["sd"])
         Zs = (Xs - mu_s) / sd_s
         Zt = (Xt - mu_t) / sd_t
 
@@ -823,13 +847,13 @@ def phase_evaluate(args):
         # ---- check if aligner-independent native files already exist ----
         pair_out_dir = os.path.join(results_dir, eval_ds, pair_name)
         os.makedirs(pair_out_dir, exist_ok=True)
-        native_curves_path = os.path.join(pair_out_dir, f"native_curves_{eval_ds}.json")
-        native_preds_path = os.path.join(pair_out_dir, f"native_preds_{eval_ds}.json")
+        native_curves_path = os.path.join(pair_out_dir, f"native_curves{mode_sfx}_{eval_ds}.json")
+        native_preds_path = os.path.join(pair_out_dir, f"native_preds{mode_sfx}_{eval_ds}.json")
         need_native = not os.path.exists(native_curves_path)
 
         native_curves = {
             "src_layer": Ls, "tgt_layer": Lt,
-            "src_layer_auc": sc["best_auc"], "tgt_layer_auc": tc["best_auc"],
+            "src_layer_auc": sc["best_auc"], "tgt_layer_auc": tc["layer_aucs"][Lt],
             "src_eval_auc": src_eval_auc,
             "eval_ds": eval_ds,
             "n_grid": valid_grid,
@@ -937,10 +961,11 @@ def phase_evaluate(args):
             _aligner_tag(a, hyperparams.get(a, {}))
             for a in available_aligners
         )
-        out_pg = os.path.join(pair_out_dir, f"probe_grid_align_{align_ds}_{aligner_suffix}.json")
+        grid_type = "probe_grid_btl" if args.transfer_mode == "best-to-last" else "probe_grid"
+        out_pg = os.path.join(pair_out_dir, f"{grid_type}_align_{align_ds}_{aligner_suffix}.json")
         _save_json(out_pg, pg)
 
-        out_preds = os.path.join(pair_out_dir, f"predictions_align_{align_ds}_{aligner_suffix}.json")
+        out_preds = os.path.join(pair_out_dir, f"predictions{mode_sfx}_align_{align_ds}_{aligner_suffix}.json")
         _save_json(out_preds, preds)
         print(f"  -> saved probe_grid + predictions for {pair_name} ({tag}) [{aligner_suffix}]")
 
@@ -1252,7 +1277,8 @@ def phase_summary(args):
     # sep.transfer.sweep_summary, not here.
     hyperparams = _build_hyperparams(args)
     run_tag = _aligner_tag("ridge", hyperparams["ridge"])
-    selector = make_run_variant_selector("probe_grid", hyperparams)
+    grid_type = "probe_grid_btl" if args.transfer_mode == "best-to-last" else "probe_grid"
+    selector = make_run_variant_selector(grid_type, hyperparams)
     hparam_note = f"aligner hyperparams: {run_tag}"
 
     import matplotlib.pyplot as plt
@@ -1263,9 +1289,9 @@ def phase_summary(args):
 
     for eval_ds in args.datasets:
         cross_ds_list = cross_map.get(eval_ds) or None
-        fig = _make_summary_fig(eval_ds, "probe_grid", results_dir,
+        fig = _make_summary_fig(eval_ds, grid_type, results_dir,
                                 selector, hparam_note, cross_datasets=cross_ds_list)
-        stem = f"summary_{eval_ds}_probe_grid_{run_tag}"
+        stem = f"summary_{eval_ds}_{grid_type}_{run_tag}"
         for ext in ("pdf", "png"):
             path = os.path.join(plots_dir, f"{stem}.{ext}")
             dpi = 200 if ext == "pdf" else 150
@@ -1283,7 +1309,8 @@ def phase_summary(args):
     else:
         from sep.transfer.compute_venn import compute_all as compute_venn_all
         venn_files = compute_venn_all(args.out_dir, eval_datasets=args.datasets,
-                                      aligner_suffix=run_tag, verbose=False)
+                                      aligner_suffix=run_tag, verbose=False,
+                                      mode_sfx=_mode_suffix(args.transfer_mode))
         if not venn_files:
             print(f"  [venn] skipped: no predictions_align_*_{run_tag}.json found "
                   f"(run evaluate for alpha={args.alpha:g} first)")
@@ -1353,6 +1380,9 @@ def _common_args(p):
                    help="dataset names to expand, e.g. --datasets squad nq")
     p.add_argument("--cross-align-dataset", nargs="*", default=[],
                    help="eval_ds:align_ds mappings, e.g. squad:nq nq:squad")
+    p.add_argument("--transfer-mode", default="best-to-best",
+                   choices=["best-to-best", "best-to-last"],
+                   help="which target layer to transfer to: best (default) or last layer")
 
 
 def main():
