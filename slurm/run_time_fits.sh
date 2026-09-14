@@ -6,19 +6,18 @@
 # Reads the existing probe/alignment caches -- nothing is refit for real, and no
 # existing artefact is overwritten.
 #
-# Outputs:
-#   $OUT/timing_fits.json                     the timings, in the same schema as
-#                                             transfer_v2/timing.json
-#   $OUT/timing_table_{squad,nq,trivia_qa}.csv  the final per-dataset tables
-#   $OUT/timing_collect_data_all.json         T1/T2 per dataset+model (table by-product)
-#   $OUT/fit_timing/z/<dataset>__<model>.npz  cached best-layer features (~65 MB each,
-#                                             ~1.2 GB total; safe to delete afterwards)
-#   $OUT/timing_table_prev_<timestamp>/       backup of the CSVs being replaced
-#   $OUT/time_fits.log                        full log, if invoked as suggested below
+# Outputs, all under $TIMING = <scratch>/transfer_v2/timing:
+#   timing_fits.json                     T4 (probe_cache) and T5 (align_cache) + _meta
+#   timing_table_{squad,nq,trivia_qa}.csv  the final per-dataset tables
+#   timing_collect_data_all.json         T1/T2 per dataset+model (table by-product)
+#   fit_timing/z/<dataset>__<model>.npz  cached best-layer features (~65 MB each,
+#                                        ~1.2 GB total; safe to delete afterwards)
+#   timing_table_prev_<timestamp>/       backup of the CSVs being replaced
+#   time_fits.log                        full log, if invoked as suggested below
 #
 # Usage:
 #   nohup bash slurm/run_time_fits.sh \
-#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/time_fits.log 2>&1 &
+#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/timing/time_fits.log 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,7 +42,9 @@ echo "Interpreter: $PYTHON"
 "$PYTHON" -c "import numpy; print('numpy', numpy.__version__)"
 
 OUT=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2
-WORK="$OUT/fit_timing"
+TIMING="$OUT/timing"          # every timing artefact lives here
+WORK="$TIMING/fit_timing"
+mkdir -p "$TIMING"
 DATASETS=(squad nq trivia_qa)
 
 # transfer2 --out-dir per dataset (TriviaQA was run under a different out-dir).
@@ -71,46 +72,39 @@ echo "=========================================="
     --n 1500 \
     --alpha 1e4 \
     --repeats 3 \
-    --out-json "$OUT/timing_fits.json"
+    --out-json "$TIMING/timing_fits.json"
 
 echo ""
 echo "=========================================="
 echo "Phase 3: timing tables  $(date '+%H:%M:%S')"
 echo "=========================================="
 
-# T1/T2 live in two directories (squad+nq vs trivia_qa); make_timing_table reads one
-# flat dir of <dataset>_<model>.json, so link them together.
-T1T2="$WORK/t1t2"
-rm -rf "$T1T2"; mkdir -p "$T1T2"
-for src in "$OUT/data_generation_timing" "$OUT/data_generation_timing_trivia_qa"; do
-    if [[ -d "$src" ]]; then
-        ln -sf "$src"/*.json "$T1T2"/ 2>/dev/null || true
-    else
-        echo "WARNING: missing T1/T2 dir $src"
-    fi
-done
-echo "T1/T2 files: $(ls -1 "$T1T2" | wc -l)"
+# T1/T2 for all datasets live in one flat dir of <dataset>_<model>.json, written by
+# slurm/run_collect_timing.sh.
+T1T2="$TIMING/data_generation_timing"
+[[ -d "$T1T2" ]] || { echo "ERROR: missing T1/T2 dir $T1T2 (run slurm/run_collect_timing.sh)"; exit 1; }
+echo "T1/T2 files: $(ls -1 "$T1T2"/*.json | wc -l)  <- $T1T2"
 
 # Keep the CSVs we are about to replace -- they are the numbers currently in the paper.
-BACKUP="$OUT/timing_table_prev_$(date '+%Y%m%d_%H%M%S')"
-if compgen -G "$OUT/timing_table_*.csv" > /dev/null; then
+BACKUP="$TIMING/timing_table_prev_$(date '+%Y%m%d_%H%M%S')"
+if compgen -G "$TIMING/timing_table_*.csv" > /dev/null; then
     mkdir -p "$BACKUP"
-    cp "$OUT"/timing_table_*.csv "$BACKUP"/
+    cp "$TIMING"/timing_table_*.csv "$BACKUP"/
     echo "Previous CSVs backed up to $BACKUP"
 fi
 
 "$PYTHON" -m sep.transfer.make_timing_table \
     --collect-timing-base "$T1T2" \
-    --transfer-v2-timing  "$OUT/timing_fits.json" \
+    --transfer-v2-timing  "$TIMING/timing_fits.json" \
     --pair-list           "$REPO_ROOT/slurm/inputs/pair_list.txt" \
-    --out-json            "$OUT/timing_collect_data_all.json" \
-    --out-csv-dir         "$OUT" \
+    --out-json            "$TIMING/timing_collect_data_all.json" \
+    --out-csv-dir         "$TIMING" \
     --datasets            "${DATASETS[@]}"
 
 echo ""
 echo "Done.  $(date '+%H:%M:%S')"
-echo "Timings:        $OUT/timing_fits.json"
+echo "Timings:        $TIMING/timing_fits.json"
 for ds in "${DATASETS[@]}"; do
-    echo "Table:          $OUT/timing_table_${ds}.csv"
+    echo "Table:          $TIMING/timing_table_${ds}.csv"
 done
 echo "Feature cache:  $WORK/z/   (deletable)"

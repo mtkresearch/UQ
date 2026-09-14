@@ -1,21 +1,25 @@
-"""All paper figures and tables for the SE probe transfer experiments, in one run.
+"""All paper figures and tables for the V4 SE probe transfer experiments, in one run.
 
-Produces, at ridge alpha=1e4:
-  * 3 probe-grid figures (one per eval dataset), 6x4 = 21 model pairs each, with
-    native source, native target, same-dataset alignment and two cross-dataset
-    alignments per panel -- for every transfer mode named in --modes.
-  * 3 subset figures, one per eval dataset: the same curves for only the 6
-    representative pairs of paper_subset_fig.SUBSET_GRID, laid out 2x3 with
-    "source -> target" panel titles (--skip-subset turns them off).
-  * The Venn error decomposition: 54 diagrams (3 eval x 3 align x 6 n), 3 CSVs, and
-    9 LaTeX tables at n=1500 via plot_venn_grid + gen_venn_latex_tables.
+V4 ran all four transfer modes end to end, so the outputs are organised BY MODE:
 
-The runs live in separate out-dirs, so this assembles ONE merged results tree of
-symlinks (nothing is copied or modified -- the source dirs are read-only inputs) and
-hands that tree to the figure builder.
+  <out-dir>/<mode>/            one folder per mode in --modes, holding only that
+                               mode's results -- 3 probe-grid figures (21 pairs),
+                               3 subset figures (6 pairs) and that mode's own Venn
+                               figures + CSV + LaTeX tables
+  <out-dir>/overlay_<m1>_<m2>/ one folder per --overlay / --overlay-set combo, with
+                               those modes' curves drawn on top of each other in the
+                               same 21-pair and 6-pair figures (1 + 4k curves per
+                               panel; no Venn -- the Venn stats live per mode)
 
-TRANSFER MODES (--modes, default "best")
-----------------------------------------
+Each figure, at ridge alpha=1e4, carries native source, native target, same-dataset
+alignment and the two cross-dataset alignments per panel, per mode drawn.
+
+The four runs live in separate out-dirs, so each group assembles its OWN merged
+results tree of symlinks (nothing is copied or modified -- the source dirs are
+read-only inputs) and hands that tree to the figure builder.
+
+TRANSFER MODES (--modes, default: all four)
+-------------------------------------------
 Every mode uses the SAME source probe (the source model's best layer) and the same
 alignment fit, probe-size grid and 500-row eval.  They differ only in WHICH TARGET
 LAYER the alignment maps into, and therefore in how many target SE labels that
@@ -27,10 +31,14 @@ choice costs:
   b2a    best-to-align       layer minimising the held-out alignment residual
                              (0 labels: no target SE label is read at all)
 
---modes takes any subset, e.g. `--modes best bbs` or `--modes best btl bbs b2a`.
-Each selected mode contributes 4 curves per panel (its native target + its
-same-align + its two cross-align alignments); the grey native-source curve is
-mode-independent and drawn once.  So k modes give 1 + 4k curves per panel.
+b2b / b2l are accepted as aliases of best / btl everywhere a mode is named.
+
+--modes takes any subset and gives each of them its own folder.  --overlay takes a
+subset to draw together in one extra folder: each mode there contributes 4 curves
+per panel (its native target + its same-align + its two cross-align alignments) and
+the grey native-source curve is mode-independent and drawn once, so k overlaid modes
+give 1 + 4k curves per panel (`--overlay b2b b2l` -> 9).  A mode whose run has not
+produced results yet is reported and skipped, not fatal.
 
   COLOUR    = which dataset the alignment was fitted on
               (blue = same as eval, green/red = the two cross datasets;
@@ -39,72 +47,60 @@ mode-independent and drawn once.  So k modes give 1 + 4k curves per panel.
               long-dash = b2a  (the native-target curves use a second, dashier
               variant of the same idea so they stay distinguishable in black)
 
-With only "best" selected the cross curves stay dashed, exactly as in the
-published figures; as soon as a second mode is added they go solid, because then
+In a single-mode folder the cross curves stay dashed, exactly as in the published
+figures; in an overlay folder they take their mode's linestyle, because there
 linestyle has to mean "mode" and nothing else.
 
 EXACTLY WHICH FILES ARE READ
 ----------------------------
-Source roots:
-  P = /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled/results     (post-debug)
-  L = /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/results            (older run)
-  T = /build_bak/UQ/UQ-transfer/sep_scratch/transfer_v2_trivia_qa/results
-  B = /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_btl/results        (btl)
-  S = /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_bbs/results        (bbs)
-  A = /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_b2a/results        (b2a)
+Source roots, all under /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4:
+  transfer_v4_b2b/results   best   (files have no mode infix)
+  transfer_v4_btl/results   btl
+  transfer_v4_bbs/results   bbs
+  transfer_v4_b2a/results   b2a    -- NOT PRODUCED YET: the run has only written
+                                      probes/ and tgt_layers/, so this mode is
+                                      skipped with a warning until it finishes
 
-<PAIR> ranges over the 21 dirs found under <native root>/<eval_ds>/, e.g.
-"gemma-4-12b_to_qwen3-8b". Per panel line, at alpha=1e4:
+Unlike v2 -- where best-to-best had to be stitched together out of a pooled root, a
+legacy root and a separate TriviaQA root -- each v4 run holds all 9
+(eval_ds, align_ds) cells of its mode under one tree, so native, same-align and both
+cross-align curves of a mode always come from the same place.
 
-  mode "best", figure NQ  (native root P; pair list = ls P/nq/)
-    grey  source probe on src   P/nq/<PAIR>/native_curves_nq.json              (curveA_src)
-    black native target         P/nq/<PAIR>/native_curves_nq.json              (curveA_native)
-    blue  align NQ        (same) P/nq/<PAIR>/probe_grid_align_nq_ridge_a1e4.json
-    green align SQuAD    (cross) L/nq/<PAIR>/probe_grid_align_squad_ridge_a1e4.json
-    red   align TriviaQA (cross) L/nq/<PAIR>/probe_grid_align_trivia_qa_ridge_a1e4.json
-  Figure SQuAD is the same with squad/nq swapped; figure TriviaQA takes all five
-  files from T.  Beside each probe_grid file sits the venn_align_<align_ds>_ridge_a1e4.json
-  used for the Venn outputs -- same root per align_ds, so figures and tables never
-  disagree about their source.
+<PAIR> ranges over the 21 dirs found under <root>/<eval_ds>/, e.g.
+"gemma-4-12b_to_qwen3-8b".  Per panel line, at alpha=1e4, with I = "" for best and
+"<mode>_" otherwise:
 
-  modes "btl" / "bbs" / "b2a" (roots B / S / A)
-    black native target         <root>/<eval_ds>/<PAIR>/native_curves_<mode>_<eval_ds>.json
-    blue/green/red alignments   <root>/<eval_ds>/<PAIR>/probe_grid_<mode>_align_<ads>_ridge_a1e4.json
-  Unlike the fragmented best-to-best roots, all 9 (eval_ds, align_ds) cells of each
-  of these runs live under one root, so a mode's cross-align cells come from the
-  same place as its same-align one.  The "_<mode>_" infix in the filenames is what
-  lets every mode be symlinked into one merged pair dir without collisions.
+  grey  source probe on src    <root>/<eval_ds>/<PAIR>/native_curves_I<eval_ds>.json  (curveA_src)
+  black native target          <root>/<eval_ds>/<PAIR>/native_curves_I<eval_ds>.json  (curveA_native)
+  blue  align <eval_ds> (same) <root>/<eval_ds>/<PAIR>/probe_grid_Ialign_<eval_ds>_ridge_a1e4.json
+  green/red the two crosses    <root>/<eval_ds>/<PAIR>/probe_grid_Ialign_<ads>_ridge_a1e4.json
 
-A panel simply omits the curves of a mode whose files are absent, rather than
-blanking, so a partially-finished run can still be plotted.  The L run that
-supplies the NQ/SQuAD cross curves fits its alignment on the eval rows, but of the
-CROSS dataset -- those rows are never scored, so there is nothing to leak into the
-reported AUROC.  Only a same-align curve could leak that way, and every same-align
-curve here is fit on `pool`.
+Beside each probe_grid file sits the venn_align_<align_ds>_ridge_a1e4.json used for
+that mode's Venn outputs, so figures and tables never disagree about their source.
+The "_<mode>_" infix is what lets several modes be symlinked into one merged pair dir
+without collisions.  A panel simply omits the curves of a mode whose files are
+absent, rather than blanking, so a partially-finished run can still be plotted.
 
 VENN OUTPUTS
 ------------
-The Venn stats (venn_align_<ds>_<tag>.json) come from ONE mode, chosen by
---venn-mode; the default is the single non-"best" mode when exactly one is
-selected (so `--modes best btl` behaves as the old --btl did) and "best"
-otherwise.  Careful: compute_venn.py drops the mode suffix when naming its output
-(it writes venn_align_<ds>_<tag>.json out of predictions_<mode>_align_<ds>_<tag>.json),
-so the modes' Venn files are indistinguishable by name and only their directory
-tells them apart.  That is why only one mode's are ever linked into a pair dir, and
-why the published Venn directory gets a _<mode> suffix for non-"best" modes.
+Venn stats (venn_align_<ds>_<tag>.json) carry NO mode infix -- compute_venn.py drops
+it when naming its output (it writes venn_align_<ds>_<tag>.json out of
+predictions_<mode>_align_<ds>_<tag>.json) -- so two modes' Venn files are
+indistinguishable by name and only their directory tells them apart.  That is
+exactly why the Venn output is built per mode here, inside <out-dir>/<mode>/, and
+never for an overlay folder.
 
 WHERE THEY GO
 -------------
-Each file above is symlinked to
-  <out-dir>/_merged_ridge_a1e4/results/<eval_ds>/<PAIR>/<same basename>
+Per group (a mode folder or an overlay folder), the files above are symlinked to
+  <group>/_merged_ridge_a1e4/results/<eval_ds>/<PAIR>/<same basename>
 and the outputs are written to
-  <out-dir>/final_<eval_ds>_probe_grid_ridge_a1e4<modes>.{pdf,png}  probe-grid figures
-  <out-dir>/final_<eval_ds>_subset6_ridge_a1e4<modes>.{pdf,png}     6-pair subset figures
-  <out-dir>/venn_ridge_a1e4[_<mode>]/venn_<eval_ds>_align_<ds>_n<n>.png   Venn diagrams
-  <out-dir>/venn_ridge_a1e4[_<mode>]/table_<eval_ds>_ridge_a1e4.csv       raw Venn counts
-  <out-dir>/venn_ridge_a1e4[_<mode>]/table_<eval_ds>_align_<ds>_n1500.tex LaTeX tables
-where <modes> is "" for the published best-to-best figures and e.g. "_btl",
-"_bbs_b2a", "_btl_only" otherwise -- so no run can overwrite another's figures.
+  <group>/final_<eval_ds>_probe_grid_ridge_a1e4_<tag>.{pdf,png}  21-pair figures
+  <group>/final_<eval_ds>_subset6_ridge_a1e4_<tag>.{pdf,png}     6-pair subset figures
+  <group>/venn_ridge_a1e4/venn_<eval_ds>_align_<ds>_n<n>.png     Venn diagrams
+  <group>/venn_ridge_a1e4/table_<eval_ds>_ridge_a1e4.csv         raw Venn counts
+  <group>/venn_ridge_a1e4/table_<eval_ds>_align_<ds>_n1500.tex   LaTeX tables
+where <tag> is the group's modes joined by "_", e.g. "best", "btl", "best_btl".
 
 The merged tree under _merged_* is disposable: it is rebuilt from scratch on every run
 (and the Venn files are copied out of it, not left behind as symlinks).
@@ -114,10 +110,17 @@ Run with --manifest to dump every single dst <- src line to
 (and equivalently: `ls -l` / `readlink` inside the _merged_* tree shows the same thing).
 
 Usage:
-    python -m sep.transfer.plot_final_figures                 # everything, ./final_figures
-    python -m sep.transfer.plot_final_figures --modes best btl bbs b2a --skip-venn
-    python -m sep.transfer.plot_final_figures --out-dir /tmp/figs --manifest
-    python -m sep.transfer.plot_final_figures --skip-venn --datasets nq   # quick iteration
+    # all available modes, one folder each (figures + Venn), into transfer_v4_final/
+    python -m sep.transfer.plot_final_figures_v4
+
+    # per-mode folders plus one b2b+b2l overlay folder
+    python -m sep.transfer.plot_final_figures_v4 --overlay b2b b2l
+
+    # only overlays, two combos, no Venn
+    python -m sep.transfer.plot_final_figures_v4 --skip-per-mode \
+        --overlay-set b2b+b2l b2b+bbs
+
+    python -m sep.transfer.plot_final_figures_v4 --skip-venn --datasets nq  # quick iter
 """
 import argparse
 import os
@@ -149,22 +152,22 @@ _SHORT = {
     "llama-3.2-1b": "Llama-3.2-1B",
 }
 
-POOLED = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_pooled/results"
-LEGACY = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/results"
-TRIVIA = "/build_bak/UQ/UQ-transfer/sep_scratch/transfer_v2_trivia_qa/results"
+V4 = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4"
 
-# The alternative target-layer runs.  One root each for all three eval datasets,
-# unlike the fragmented best-to-best roots above, and their files carry a
-# "_<mode>" infix, so every mode can be symlinked into one merged pair dir.
-BTL = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_btl/results"
-BBS = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_bbs/results"
-B2A = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2_b2a/results"
+# One self-contained run per transfer mode.  Unlike v2 -- where best-to-best was
+# stitched together out of three roots (pooled / legacy / trivia_qa) -- each v4 run
+# holds all 9 (eval_ds, align_ds) cells of its mode under a single results tree, so
+# native, same-align and both cross-align curves always come from the same place.
+B2B = f"{V4}/transfer_v4_b2b/results"
+BTL = f"{V4}/transfer_v4_btl/results"
+BBS = f"{V4}/transfer_v4_bbs/results"
+B2A = f"{V4}/transfer_v4_b2a/results"     # not produced yet (probes/tgt_layers only)
 
 # eval_ds -> (dir holding native curves + same-align, [(cross_align_ds, dir), ...])
 SOURCES = {
-    "nq":        (POOLED, [("squad", LEGACY), ("trivia_qa", LEGACY)]),
-    "squad":     (POOLED, [("nq", LEGACY), ("trivia_qa", LEGACY)]),
-    "trivia_qa": (TRIVIA, [("nq", TRIVIA), ("squad", TRIVIA)]),
+    "nq":        (B2B, [("squad", B2B), ("trivia_qa", B2B)]),
+    "squad":     (B2B, [("nq", B2B), ("trivia_qa", B2B)]),
+    "trivia_qa": (B2B, [("nq", B2B), ("squad", B2B)]),
 }
 
 # ---- transfer modes -----------------------------------------------------------
@@ -176,23 +179,37 @@ SOURCES = {
 #     nat_ls  its native-target curve (dashier variant, so two black curves of
 #             neighbouring modes stay distinguishable)
 #     label   what the legend appends, e.g. "Transfer (NQ, 150-label)"
-# dir=None marks best-to-best, whose files have no mode infix and whose roots are
-# per-dataset (SOURCES) rather than one tree.
+# dir=None marks best-to-best, whose files have no mode infix and whose root is
+# reached through SOURCES (all three eval datasets point at B2B in v4).
 MODES = {
-    "best": dict(dir=None, ls="-",            marker="s",
-                 nat_ls="-",                  nat_marker="o", label=None,
+    "best": dict(dir=None, ls="-",                       marker="s",
+                 nat_marker="o", label=None,
                  desc="best-to-best (1500 target labels pick the layer)"),
-    "btl":  dict(dir=BTL,  ls="-.",           marker="v",
-                 nat_ls="--",                 nat_marker="^", label="final",
+    "btl":  dict(dir=BTL,  ls=(0, (5, 2)),               marker="v",
+                 nat_marker="^", label="final",
                  desc="best-to-last (target's final layer, 0 labels)"),
-    "bbs":  dict(dir=BBS,  ls=":",            marker="P",
-                 nat_ls=(0, (1, 1)),          nat_marker="X", label="150-label",
+    "bbs":  dict(dir=BBS,  ls=(0, (4, 1.5, 1, 1.5)),     marker="P",
+                 nat_marker="X", label="150-label",
                  desc="best-to-best-sub (150 target labels pick the layer)"),
-    "b2a":  dict(dir=B2A,  ls=(0, (6, 1.5)),  marker="*",
-                 nat_ls=(0, (3, 1, 1, 1)),    nat_marker="d", label="label-free",
+    "b2a":  dict(dir=B2A,  ls=(0, (1.4, 1.4)),           marker="*",
+                 nat_marker="d", label="label-free",
                  desc="best-to-align (alignment residual picks the layer, 0 labels)"),
 }
+
+# Style used whenever a figure draws ONE mode only (the per-mode folders).  There is
+# no second mode to tell apart there, so linestyle carries no information and every
+# mode is drawn in the canonical published look -- solid native + solid same-align +
+# dashed cross-align -- which makes the four per-mode figures directly comparable
+# instead of each having its own dash pattern.
+SOLO = dict(ls="-", marker="s", nat_marker="o", cross_ls="--")
 MODE_ORDER = list(MODES)          # drawing + naming order, independent of CLI order
+
+# The run scripts and the paper call best-to-best "b2b" and best-to-last "b2l";
+# accept both spellings on the command line and normalise to the keys above.
+MODE_ALIAS = {m: m for m in MODE_ORDER}
+MODE_ALIAS.update({"b2b": "best", "b2l": "btl", "b2b_sub": "bbs"})
+
+OUT_DIR = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4_final"
 
 
 def mode_infix(mode):
@@ -236,15 +253,19 @@ def _legend_frac(n_rows):
 
 # Short legend labels.  "Native"/"Transfer" instead of the old "native"/
 # "transferred alignment", plus the mode tag ("final", "150-label", "label-free").
-def _lbl_transfer(ds, mode):
+# The tag is dropped when a figure draws ONE mode: it would then be the same on every
+# entry of every panel -- 105 repetitions of a constant on a 21-pair figure, which is
+# what used to force the legend font down and made the four per-mode figures differ in
+# legend width.  Which mode a per-mode figure shows is in its folder and file name.
+def _lbl_transfer(ds, mode, tag=True):
     name = _DS_NAME.get(ds, ds.upper())
-    tag = MODES[mode]["label"]
-    return f"Transfer ({name}, {tag})" if tag else f"Transfer ({name})"
+    t = MODES[mode]["label"] if tag else None
+    return f"Transfer ({name}, {t})" if t else f"Transfer ({name})"
 
 
-def _lbl_native(mode):
-    tag = MODES[mode]["label"]
-    return f"Native target ({tag} layer)" if tag else "Native target"
+def _lbl_native(mode, tag=True):
+    t = MODES[mode]["label"] if tag else None
+    return f"Native target ({t} layer)" if t else "Native target"
 
 
 def _link(src, dst):
@@ -313,7 +334,8 @@ def build_merged_tree(work_dir, eval_ds, native_dir, cross_specs, ridge_tag,
 
 
 def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
-                   modes=("best",), pair_grid=None, shared_ylim=False):
+                   modes=("best",), pair_grid=None, shared_ylim=False,
+                   only_same_align=False):
     """Paper version of transfer2._make_summary_fig.
 
     Same data and layout; publication labelling only -- no suptitle, no per-panel
@@ -339,6 +361,10 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
     window than the 6x4 grid whenever its 6 pairs do not span the full spread.
     shared_ylim instead pins the figure to the fixed YLIM window of its eval
     dataset, which also makes the subset and full figures share one range.
+
+    only_same_align drops the two cross-dataset alignment curves, leaving 1 + 2k
+    curves per panel instead of 1 + 4k: the readable version of a 3- or 4-mode
+    overlay, where the point is comparing the modes, not the alignment datasets.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -410,12 +436,12 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
 
             # With more than one mode overlaid, linestyle has to mean ONE thing --
             # the mode -- so the cross curves are drawn in their mode's linestyle
-            # like the same-align ones (colour already says which dataset).  With
-            # "best" alone, keep the historical dashed cross curves untouched.
+            # like the same-align ones (colour already says which dataset).  A
+            # single-mode figure has nothing to disambiguate and uses SOLO instead.
             single_mode = len(modes) == 1
 
             for mode in modes:
-                spec = MODES[mode]
+                spec = SOLO if single_mode else MODES[mode]
                 z = 3 if mode == "best" else 4
 
                 if mode in native:
@@ -426,8 +452,9 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
                             for v in nd["curveA_native"]]
                     ax.plot(gm, vals, color=C_NATIVE, linewidth=LW,
                             marker=spec["nat_marker"], markersize=MS,
-                            markeredgewidth=0, linestyle=spec["nat_ls"],
-                            label=_lbl_native(mode), zorder=z)
+                            markeredgewidth=0, linestyle=spec["ls"],
+                            label=_lbl_native(mode, tag=not single_mode),
+                            zorder=z)
 
                 select_variant = selectors[mode]
 
@@ -443,10 +470,12 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
                                     linewidth=LW, marker=spec["marker"],
                                     markersize=MS, markeredgewidth=0,
                                     linestyle=spec["ls"],
-                                    label=_lbl_transfer(eval_ds, mode), zorder=z)
+                                    label=_lbl_transfer(eval_ds, mode,
+                                                        tag=not single_mode),
+                                    zorder=z)
 
-                cross_ls = "--" if (mode == "best" and single_mode) else spec["ls"]
-                for ds_idx, ds in enumerate(cross_datasets):
+                cross_ls = SOLO["cross_ls"] if single_mode else spec["ls"]
+                for ds_idx, ds in enumerate([] if only_same_align else cross_datasets):
                     cross_pick = select_variant(pair_dir, ds)
                     if cross_pick is None:
                         continue
@@ -463,7 +492,9 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
                             ax.plot(xg, curve, color=c, linewidth=LW,
                                     marker=spec["marker"], markersize=MS,
                                     markeredgewidth=0, linestyle=cross_ls,
-                                    label=_lbl_transfer(ds, mode), zorder=z)
+                                    label=_lbl_transfer(ds, mode,
+                                                        tag=not single_mode),
+                                    zorder=z)
 
             ax.set_xscale("log")
             ax.set_xlabel("No. of source probe training samples",
@@ -488,27 +519,57 @@ def make_paper_fig(eval_ds, results_dir, selectors, cross_datasets,
                                         fontsize=FS_LABEL, color=INK_SEC)
 
     # ---- legends ---------------------------------------------------------------
-    # Up to 10 entries (1 or 2 modes) fit inside every panel, two columns beyond 4,
-    # which is how the published figures are labelled.  Beyond that (3+ modes) an
-    # in-panel box is wider than the panel itself -- it squeezed the axes to nothing
-    # -- so the figure gets ONE legend below all panels instead, and the panels
-    # keep their full height.
+    # A single mode's 5 entries fit inside every panel, which is how the published
+    # figures are labelled.  Any overlay (>=9 entries, and the labels carry a mode tag
+    # on top) needs a box wider than the panel: it would either squeeze the axes to
+    # nothing or, on the fixed canvas, be clipped at the figure edge.  So overlays get
+    # ONE legend below all panels instead, and the panels keep their full height.
     n_entries = len(legend_hl[0])
-    inside = n_entries <= 10
+    inside = n_entries <= 6
     if inside:
         ncol = 1 if n_entries <= 4 else 2
         legend_rows = -(-n_entries // ncol)
-        for ax in drawn:
+
+        def put_legend(ax, fontsize):
             handles, labels = ax.get_legend_handles_labels()
-            ax.legend(handles, labels, fontsize=FS_LEGEND, frameon=True,
-                      framealpha=0.9, edgecolor="#cccccc", loc="upper left",
-                      ncol=ncol, handlelength=1.6, handletextpad=0.5,
-                      columnspacing=1.0, labelspacing=0.35, borderpad=0.4)
+            leg = ax.legend(handles, labels, fontsize=fontsize, frameon=True,
+                            framealpha=0.9, edgecolor="#cccccc", loc="upper left",
+                            ncol=ncol, handlelength=1.6, handletextpad=0.5,
+                            columnspacing=1.0, labelspacing=0.35, borderpad=0.4)
+            # constrained_layout counts an in-axes legend as part of the axes'
+            # decorations, so a mode with longer labels ("Transfer (NQ, 150-label)")
+            # got a NARROWER data box than "best" -- the panels of the four per-mode
+            # figures then did not line up.  Taking the legend out of the layout
+            # fixes the box geometry to the text-independent one.
+            leg.set_in_layout(False)
+            return leg
+
+        # ... but out of the layout, an over-wide box now spills into the next panel
+        # instead of shrinking its own, so shrink the FONT until it fits the box.
+        # Measured on the widest-labelled panel; the same size is then used for all,
+        # so every panel of a figure is labelled identically.
+        fig.canvas.draw()
+        rend = fig.canvas.get_renderer()
+        widest = max(drawn, key=lambda ax: put_legend(ax, FS_LEGEND)
+                     .get_window_extent(rend).width)
+        fs = FS_LEGEND
+        while fs > 6.0:
+            leg = put_legend(widest, fs)
+            if (leg.get_window_extent(rend).width
+                    <= 0.98 * widest.get_window_extent(rend).width):
+                break
+            fs -= 0.5
+        for ax in drawn:
+            put_legend(ax, fs)
     else:
         legend_rows = 0   # nothing overlaps the curves, so no headroom needed
+        # ABOVE the panels, not below: on the 6x4 grid a bottom legend sits ~3800px
+        # past 24 panels and is missed entirely.  Columns are chosen to keep it at
+        # most 4 rows tall, so 9 entries (2 modes) give 3 rows and 17 (4 modes) give 4.
+        ncol = min(5, max(4, -(-n_entries // 4)))
         fig.legend(*legend_hl, fontsize=FS_LEGEND + 1.5, frameon=True,
                    framealpha=0.9, edgecolor="#cccccc",
-                   loc="outside lower center", ncol=min(4, n_entries),
+                   loc="outside upper center", ncol=ncol,
                    handlelength=2.0, handletextpad=0.6, columnspacing=1.4,
                    labelspacing=0.4, borderpad=0.5)
 
@@ -577,45 +638,113 @@ def build_venn_outputs(work_dir, out_dir, eval_ds, cross_specs, ridge_tag, venn_
           f"figures + CSV in {pub_dir}")
 
 
-def _stem_suffix(modes):
-    """Figure-name suffix for a mode selection.
+def _group_tag(modes):
+    """Directory + figure-name tag for a group of modes, e.g. "best" / "best_btl"."""
+    return "_".join(m for m in MODE_ORDER if m in modes)
 
-    "" for the published best-to-best figures, "_btl"/"_bbs_b2a"/... when extra
-    modes are overlaid on it, and a trailing "_only" when best-to-best itself is
-    not among them -- so `--modes bbs` and `--modes best bbs` cannot overwrite
-    each other's files.
+
+def render_group(out_dir, modes, args, ridge_tag, selectors, mode_dirs, do_venn):
+    """Draw one output folder: the 21-pair and 6-pair figures for `modes` overlaid.
+
+    A group is self-contained: its own merged symlink tree, its own figures, and --
+    for a single-mode group -- its own Venn outputs, taken from that same mode.  So
+    <out-dir>/best/ holds only best-to-best results, <out-dir>/best_btl/ holds the
+    overlay of the two, and neither can overwrite the other.
+
+    Returns the [(dst, src), ...] link audit trail.
     """
-    extra = [m for m in MODE_ORDER if m in modes and m != "best"]
-    if not extra:
-        return ""
-    return "_" + "_".join(extra) + ("" if "best" in modes else "_only")
+    import matplotlib.pyplot as plt
+
+    tag = _group_tag(modes)
+    work_dir = os.path.join(out_dir, f"_merged_{ridge_tag}")
+    # rebuild from scratch: stale symlinks from an earlier alpha would silently survive
+    if os.path.isdir(work_dir):
+        shutil.rmtree(work_dir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Venn stats carry no mode infix, so one mode has to supply them; inside a
+    # single-mode folder that is unambiguously the folder's own mode.
+    venn_mode = modes[0] if len(modes) == 1 else (args.venn_mode or "best")
+
+    all_links = []
+    for eval_ds in args.datasets:
+        native_dir, cross_specs = SOURCES[eval_ds]
+        pairs, missing, links = build_merged_tree(work_dir, eval_ds, native_dir,
+                                                 cross_specs, ridge_tag,
+                                                 modes=modes, mode_dirs=mode_dirs,
+                                                 venn_mode=venn_mode)
+        all_links.extend(links)
+        print(f"[{tag}/{eval_ds}] {len(pairs)} pairs  modes: {' '.join(modes)}  "
+              f"root: {native_dir}  venn: {venn_mode if do_venn else 'skipped'}")
+        for m in missing:
+            print(f"  [warn] missing {m}")
+
+        for stem, pair_grid in _figure_specs(args, eval_ds, ridge_tag, f"_{tag}"):
+            fig = make_paper_fig(
+                eval_ds, os.path.join(work_dir, "results"), selectors,
+                cross_datasets=[ds for ds, _ in cross_specs],
+                modes=modes, pair_grid=pair_grid,
+                shared_ylim=args.shared_ylim,
+                only_same_align=args.only_same_align,
+            )
+            for ext in args.formats:
+                path = os.path.join(out_dir, f"{stem}.{ext}")
+                # NO bbox_inches="tight": it crops to the ink, and an in-panel legend
+                # box may stick out past the axes, so a mode with longer legend text
+                # ("Transfer (NQ, 150-label)") produced a wider canvas than "best" and
+                # its panels looked smaller at equal display width.  constrained_layout
+                # already handles the padding, so every figure is exactly
+                # ncols*4.8 x nrows*4.2 in and all modes' panels line up.
+                fig.savefig(path, format=ext, dpi=200 if ext == "pdf" else 150,
+                            facecolor=SURFACE)
+                print(f"  Saved: {path}")
+            plt.close(fig)
+
+        if do_venn:
+            build_venn_outputs(work_dir, out_dir, eval_ds, cross_specs,
+                               ridge_tag, args.venn_n)
+    return all_links
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out-dir", default="final_figures",
-                    help="where the figures (and the merged symlink tree) are written")
+    ap.add_argument("--out-dir", default=OUT_DIR,
+                    help=f"root for all output folders (default {OUT_DIR})")
     ap.add_argument("--alpha", type=float, default=1e4, help="ridge alpha (default 1e4)")
     ap.add_argument("--datasets", nargs="+", default=["nq", "squad", "trivia_qa"])
     ap.add_argument("--formats", nargs="+", default=["pdf", "png"])
-    ap.add_argument("--modes", nargs="+", choices=MODE_ORDER, default=["best"],
+    ap.add_argument("--modes", nargs="+", default=list(MODE_ORDER),
                     metavar="MODE",
-                    help="transfer modes to draw, each contributing its native "
-                         "target + 3 alignment curves per panel: "
+                    help="transfer modes to give their own <out-dir>/<mode>/ folder "
+                         "(figures + Venn): "
                          + "; ".join(f"{m} = {MODES[m]['desc']}" for m in MODE_ORDER)
-                         + ".  Default: best (the published figures).")
+                         + ".  b2b/b2l are accepted as aliases of best/btl.  "
+                           "Default: all four.")
+    ap.add_argument("--overlay", nargs="+", default=None, metavar="MODE",
+                    help="modes to overlay in ONE extra folder "
+                         "<out-dir>/overlay_<m1>_<m2>.../: e.g. `--overlay b2b b2l` "
+                         "draws 1+4+4 = 9 curves per panel.  Default: no overlay "
+                         "folder.  Repeatable via --overlay-set for several combos.")
+    ap.add_argument("--overlay-set", nargs="+", default=[], metavar="M1+M2",
+                    help="several overlay folders at once, each a +-joined combo, "
+                         "e.g. --overlay-set b2b+b2l b2b+bbs+b2a")
+    ap.add_argument("--skip-per-mode", action="store_true",
+                    help="only the overlay folder(s); no per-mode folders")
+    ap.add_argument("--only-same-align", action="store_true",
+                    help="drop the two cross-dataset alignment curves, leaving "
+                         "1 + 2k curves per panel instead of 1 + 4k -- the readable "
+                         "version of a 3- or 4-mode overlay.  Figures get a "
+                         "_samealign stem, so they do not overwrite the full ones.")
     ap.add_argument("--venn-n", type=int, default=1500,
                     help="n at which the LaTeX Venn tables are cut (default 1500)")
     ap.add_argument("--venn-mode", choices=MODE_ORDER, default=None,
-                    help="which mode's Venn stats to build (default: the single "
-                         "non-best mode in --modes if there is exactly one, else "
-                         "best).  Only one mode can be used: compute_venn.py "
-                         "strips the mode from those filenames.")
+                    help="unused for per-mode folders (each builds its own mode's "
+                         "Venn); only relevant if you ever ask an overlay folder for "
+                         "Venn output, where exactly one mode can supply it because "
+                         "compute_venn.py strips the mode from those filenames.")
     ap.add_argument("--skip-venn", action="store_true",
                     help="only the probe-grid figures; no Venn figures/CSV/LaTeX")
-    ap.add_argument("--btl", action="store_true",
-                    help="shorthand for --modes best btl (kept for older commands)")
     ap.add_argument("--mode-dir", nargs="+", default=[], metavar="MODE=DIR",
                     help="override a mode's results root, e.g. bbs=/path/results")
     ap.add_argument("--shared-ylim", action="store_true",
@@ -633,85 +762,76 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    modes = list(args.modes)
-    if args.btl and "btl" not in modes:
-        modes.append("btl")
-    modes = [m for m in MODE_ORDER if m in modes]
+    def resolve(names, what):
+        out = []
+        for n in names:
+            m = MODE_ALIAS.get(n)
+            if m is None:
+                ap.error(f"{what}: unknown mode {n!r}; "
+                         f"expected one of {sorted(MODE_ALIAS)}")
+            if m not in out:
+                out.append(m)
+        return [m for m in MODE_ORDER if m in out]
 
     mode_dirs = {}
     for spec in args.mode_dir:
         mode, _, path = spec.partition("=")
+        mode = MODE_ALIAS.get(mode, mode)
         if mode not in MODES or not path:
             ap.error(f"--mode-dir expects MODE=DIR with MODE in {MODE_ORDER}: {spec}")
         mode_dirs[mode] = path
-    for mode in modes:
-        if mode == "best":
-            continue
-        root = mode_dirs.get(mode) or MODES[mode]["dir"]
-        if not os.path.isdir(root):
-            ap.error(f"mode {mode} requested but {root} does not exist")
 
-    # Venn stats have no mode infix, so exactly one mode can supply them.  Default
-    # to the lone non-best mode when there is one, which keeps `--modes best btl`
-    # behaving like the old --btl.
-    extra = [m for m in modes if m != "best"]
-    venn_mode = args.venn_mode or (extra[0] if len(extra) == 1 else "best")
-    venn_suffix = "" if venn_mode == "best" else f"_{venn_mode}"
+    def root_of(mode):
+        return mode_dirs.get(mode) or (MODES[mode]["dir"] if mode != "best" else B2B)
+
+    per_mode = [] if args.skip_per_mode else resolve(args.modes, "--modes")
+
+    overlays = []
+    if args.overlay:
+        overlays.append(resolve(args.overlay, "--overlay"))
+    for combo in args.overlay_set:
+        overlays.append(resolve([c for c in combo.split("+") if c], "--overlay-set"))
+
+    # A mode whose run has not finished (b2a at the time of writing) has no results
+    # tree at all; drop it with a warning rather than aborting the whole run, so the
+    # other three modes' folders still get built.
+    def available(modes, what):
+        keep = [m for m in modes if os.path.isdir(root_of(m))]
+        for m in modes:
+            if m not in keep:
+                print(f"[skip] {what}: mode {m} has no results yet ({root_of(m)})")
+        return keep
+
+    per_mode = available(per_mode, "--modes")
+    overlays = [ms for ms in (available(ms, "--overlay") for ms in overlays) if ms]
+    groups = [(os.path.join(args.out_dir, m), [m], not args.skip_venn)
+              for m in per_mode]
+    groups += [(os.path.join(args.out_dir, "overlay_" + _group_tag(ms)), ms, False)
+               for ms in overlays]
+    if not groups:
+        ap.error("nothing to draw: no mode with results was selected")
 
     ridge_tag = _aligner_tag("ridge", {"alpha": args.alpha})
     # One selector per mode: its grids are probe_grid[_<mode>]_align_<ds>_<tag>.
     selectors = {
         m: make_run_variant_selector(f"probe_grid_{m}" if m != "best" else "probe_grid",
                                     {"ridge": {"alpha": args.alpha}})
-        for m in modes
+        for m in MODE_ORDER
     }
-    stem_suffix = _stem_suffix(modes)
 
-    work_dir = os.path.join(args.out_dir, f"_merged_{ridge_tag}")
-    # rebuild from scratch: stale symlinks from an earlier alpha would silently survive
-    if os.path.isdir(work_dir):
-        shutil.rmtree(work_dir)
     os.makedirs(args.out_dir, exist_ok=True)
-
     all_links = []
-    for eval_ds in args.datasets:
-        native_dir, cross_specs = SOURCES[eval_ds]
-        pairs, missing, links = build_merged_tree(work_dir, eval_ds, native_dir,
-                                                 cross_specs, ridge_tag,
-                                                 modes=modes, mode_dirs=mode_dirs,
-                                                 venn_mode=venn_mode)
-        all_links.extend(links)
-        print(f"[{eval_ds}] {len(pairs)} pairs  modes: {' '.join(modes)}  "
-              f"same-align+native: {native_dir}  "
-              f"cross: {', '.join(f'{d}<-{p}' for d, p in cross_specs)}  "
-              f"venn: {venn_mode}")
-        for m in missing:
-            print(f"  [warn] missing {m}")
-
-        for stem, pair_grid in _figure_specs(args, eval_ds, ridge_tag, stem_suffix):
-            fig = make_paper_fig(
-                eval_ds, os.path.join(work_dir, "results"), selectors,
-                cross_datasets=[ds for ds, _ in cross_specs],
-                modes=modes, pair_grid=pair_grid,
-                shared_ylim=args.shared_ylim,
-            )
-            for ext in args.formats:
-                path = os.path.join(args.out_dir, f"{stem}.{ext}")
-                fig.savefig(path, format=ext, dpi=200 if ext == "pdf" else 150,
-                            bbox_inches="tight", facecolor=SURFACE)
-                print(f"  Saved: {path}")
-            plt.close(fig)
-
-        if not args.skip_venn:
-            build_venn_outputs(work_dir, args.out_dir, eval_ds, cross_specs,
-                               ridge_tag, args.venn_n, pub_suffix=venn_suffix)
+    for group_dir, group_modes, do_venn in groups:
+        print(f"=== {group_dir}  ({' + '.join(group_modes)})")
+        all_links += render_group(group_dir, group_modes, args, ridge_tag,
+                                 selectors, mode_dirs, do_venn)
 
     if args.manifest:
         path = os.path.join(args.out_dir, f"manifest_{ridge_tag}.txt")
         with open(path, "w") as fh:
             fh.write(f"# every file read for these figures, as  <merged tree path>  <-  "
                      f"<source file>\n# {len(all_links)} files, ridge tag {ridge_tag}, "
-                     f"modes {' '.join(modes)}\n")
+                     f"groups {'; '.join(_group_tag(g[1]) for g in groups)}\n")
             for dst, src in all_links:
                 fh.write(f"{dst}  <-  {src}\n")
         print(f"Manifest ({len(all_links)} files): {path}")
@@ -723,6 +843,10 @@ def _figure_specs(args, eval_ds, ridge_tag, stem_suffix):
     The 6-pair subset figure is built from the same merged tree and the same call
     as the full grid, so it can never disagree with the matching panel of it.
     """
+    # --only-same-align gets its own stem, so the reduced figure never overwrites the
+    # full one of the same group.
+    if args.only_same_align:
+        stem_suffix += "_samealign"
     specs = [(f"final_{eval_ds}_probe_grid_{ridge_tag}{stem_suffix}", None)]
     if not args.skip_subset:
         from sep.transfer.paper_subset_fig import SUBSET_GRID

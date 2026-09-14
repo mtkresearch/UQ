@@ -69,35 +69,62 @@ def fmt(val, total):
     return f"{100 * int(val) / int(total):.1f}"
 
 
+def fmt_delta(v):
+    """Signed percentage-point delta, but an exact zero carries no sign."""
+    return "0.0" if f"{v:.1f}" in ("0.0", "-0.0") else f"{v:+.1f}"
+
+
 def make_table(rows, eval_ds, align_ds, n):
     align_label = _ALIGN_DS_LABEL.get(align_ds, align_ds.upper())
     eval_label  = _ALIGN_DS_LABEL.get(eval_ds,  eval_ds.upper())
 
+    # The caption states the test-set size and the pair count, so read both off the
+    # data instead of hard-coding 500 / 21.
+    present = [(src, tgt) for g in _GROUPS for src, tgt in g
+               if (eval_ds, align_ds, f"{src}_to_{tgt}", n) in rows]
+    n_test = (int(rows[(eval_ds, align_ds, f"{present[0][0]}_to_{present[0][1]}", n)]
+                  ["total"]) if present else 500)
+
     lines = []
     lines.append(r"\begin{table*}[t]")
     lines.append(r"\centering")
-    lines.append(r"\footnotesize")
-    lines.append(r"\setlength{\tabcolsep}{5pt}")
+    lines.append(r"\scriptsize")
+    lines.append(r"\setlength{\tabcolsep}{3pt}")
     lines.append(r"\caption{")
     lines.append(
-        f"    Full Venn error decomposition at $n{{=}}{n}$ on {eval_label}"
-        f" (\\% of 500 test examples), alignment dataset: {align_label}."
+        f"Full error decomposition at $n{{=}}{n}$ on {eval_label};"
+        f" alignment dataset: {align_label}."
     )
+    lines.append(
+        f"Entries are percentages of the ${n_test}$ held-out test examples."
+        " Transfer error is the classification error of the transferred probe"
+        " with respect"
+    )
+    lines.append("to the target SE labels.")
+    lines.append(r"$\Delta_{\mathrm{excl}}=EF_{\mathrm{only}}+FD_{\mathrm{only}}"
+                 r"-F_{\mathrm{only}}$")
+    lines.append("is the corrective margin excluding the triple-interaction region,"
+                 " while")
+    lines.append(r"$\Delta_{\mathrm{acc}}=\Delta_{\mathrm{excl}}-EFD$")
+    lines.append("is the exact change in target classification accuracy.")
+    lines.append(f"The mean row reports the macro-average across the "
+                 f"${len(present)}$ source--target pairs.")
     lines.append(r"}")
     lines.append(r"\label{tab:venn_full_" + f"{eval_ds}_{align_ds}" + r"}")
-    lines.append(r"\begin{tabular}{lrrrrrrrrr}")
+    lines.append(r"\begin{tabular}{lrrrrrrrrrr}")
     lines.append(r"\toprule")
     lines.append(
         r"Source $\to$ Target"
-        r"  & $\mathcal{E}$\textsubscript{only}"
-        r"  & $\mathcal{F}$\textsubscript{only}"
-        r"  & $\mathcal{D}$\textsubscript{only}"
-        r"  & $\mathcal{EF}$\textsubscript{only}"
-        r"  & $\mathcal{ED}$\textsubscript{only}"
-        r"  & $\mathcal{FD}$\textsubscript{only}"
-        r"  & $\mathcal{EFD}$"
-        r"  & \shortstack{Transfer\\error}"
-        r"  & $\Delta_{\mathrm{transfer}}$ \\"
+        r" & $E_{\mathrm{only}}$"
+        r" & $F_{\mathrm{only}}$"
+        r" & $D_{\mathrm{only}}$"
+        r" & $EF_{\mathrm{only}}$"
+        r" & $ED_{\mathrm{only}}$"
+        r" & $FD_{\mathrm{only}}$"
+        r" & $EFD$"
+        r" & \shortstack{Transfer\\error}"
+        r" & $\Delta_{\mathrm{excl}}$"
+        r" & $\Delta_{\mathrm{acc}}$ \\"
     )
 
     _COLS = ["A_only", "B_only", "C_only", "AB_only", "AC_only", "BC_only", "ABC", "D"]
@@ -116,27 +143,29 @@ def make_table(rows, eval_ds, align_ds, n):
             tgt_s = _SHORT.get(tgt, tgt)
             pair_label = f"{src_s} $\\to$ {tgt_s}"
             cols = []
+            pct = {}
             for i, col in enumerate(_COLS):
-                pct = 100 * int(r[col]) / total
-                all_pcts[i].append(pct)
-                cols.append(f"{pct:.1f}")
-            # Delta = EF_only + FD_only - F_only  (AB_only + BC_only - B_only)
-            delta = (100 * int(r["AB_only"]) / total
-                     + 100 * int(r["BC_only"]) / total
-                     - 100 * int(r["B_only"])  / total)
-            cols.append(f"{delta:+.1f}")
-            row_str = " & ".join([f"{pair_label:<40}"] + [f"{c:>5}" for c in cols])
+                pct[col] = 100 * int(r[col]) / total
+                all_pcts[i].append(pct[col])
+                cols.append(f"{pct[col]:.1f}")
+            # Corrective margin without the triple region, then the exact accuracy
+            # change: Delta_acc = Delta_excl - EFD.
+            d_excl = pct["AB_only"] + pct["BC_only"] - pct["B_only"]
+            cols.append(fmt_delta(d_excl))
+            cols.append(fmt_delta(d_excl - pct["ABC"]))
+            row_str = " & ".join([f"{pair_label:<45}"] + [f"{c:>5}" for c in cols])
             lines.append(row_str + r" \\")
 
-    # Mean row
+    # Mean row: macro-average over pairs, and the two deltas recomputed from the
+    # averaged components (so they stay consistent with the columns above them).
     means = [sum(v) / len(v) if v else 0.0 for v in all_pcts]
-    # mean Delta = mean(EF_only) + mean(FD_only) - mean(F_only)
-    # indices: AB_only=3, BC_only=5, B_only=1
-    mean_delta = means[3] + means[5] - means[1]
-    mean_cols = [f"{m:.1f}" for m in means] + [f"{mean_delta:+.1f}"]
+    # indices: B_only=1, AB_only=3, BC_only=5, ABC=6
+    mean_excl = means[3] + means[5] - means[1]
+    mean_cols = ([f"{m:.1f}" for m in means]
+                 + [fmt_delta(mean_excl), fmt_delta(mean_excl - means[6])])
     lines.append(r"\midrule")
-    mean_str = " & ".join([r"\textbf{Mean}                               "]
-                          + [f"\\textbf{{{c:>5}}}" for c in mean_cols])
+    mean_str = " & ".join([r"\textbf{Mean}"]
+                          + [f"\\textbf{{{c}}}" for c in mean_cols])
     lines.append(mean_str + r" \\")
 
     lines.append(r"\bottomrule")

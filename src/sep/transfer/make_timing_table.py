@@ -50,7 +50,7 @@ def find_wandb_timing(run_base):
 def collect_t1_t2(data_gen_timing_dir, datasets=DEFAULT_DATASETS):
     """
     Returns dict: {(dataset, model): {"T1_s": float, "T2_s": float}}
-    Reads flat files named {dataset}_{model}.json from data_generation_timing/.
+    Reads flat files named {dataset}_{model}.json from timing/data_generation_timing/.
     """
     result = {}
     skipped = []

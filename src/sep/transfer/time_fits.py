@@ -48,13 +48,13 @@ Usage
         --cache-root squad=/proj/.../transfer_v2 \
         --cache-root nq=/proj/.../transfer_v2 \
         --cache-root trivia_qa=/build_bak/.../transfer_v2_trivia_qa \
-        --work-dir /proj/.../transfer_v2/fit_timing
+        --work-dir /proj/.../transfer_v2/timing/fit_timing
 
     python -m sep.transfer.time_fits time \
-        --work-dir /proj/.../transfer_v2/fit_timing \
+        --work-dir /proj/.../transfer_v2/timing/fit_timing \
         --pair-list slurm/inputs/pair_list.txt \
         --datasets squad nq trivia_qa --n 1500 --alpha 1e4 --repeats 3 \
-        --out-json /proj/.../transfer_v2/timing_fits.json
+        --out-json /proj/.../transfer_v2/timing/timing_fits.json
 """
 import argparse
 import json

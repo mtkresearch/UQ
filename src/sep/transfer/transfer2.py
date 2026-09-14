@@ -1,13 +1,75 @@
 """transfer2.py — Efficient SE probe transfer with caching.
 
-Three phases:
+Phases:
   1. probe_cache   : for each (model, dataset), find best layer + fit probe on
                      all n_grid sizes. Save everything to disk.
+  1.5 tgt_layer_cache : best-to-align only -- pick each pair's target layer from
+                     alignment quality alone, no target labels. Writes one json
+                     per (pair, eval_ds, align_ds); phases 2 and 3 read it.
   2. align_cache   : for each (src_model, tgt_model, eval_ds, align_ds), load
                      best-layer hidden states (from cache) and fit alignment
                      matrices at all n_grid sizes. Save M, b to disk.
   3. evaluate      : combine probe cache + alignment cache to compute AUROC
                      curves (alignment_grid + probe_grid) and save results/plots.
+
+--transfer-mode selects which TARGET layer is transferred to (the source always
+uses its full-pool best layer, so existing source-side results are reusable):
+  best-to-best      target's best layer, chosen with all 1500 pool labels
+  best-to-last      target's last layer, no target labels spent on selection
+  best-to-best-sub  target's best layer, chosen with only --sub-n (default 150)
+                    labels via --sub-folds cross-validation.  Everything after
+                    layer choice -- alignment fitting, the probe-size grid, the
+                    500-row eval -- is identical to best-to-best.
+  best-to-align     target layer L minimising the held-out ||R_L(h_t) - h_s||^2,
+                    with one alignment fit per candidate L.  Spends ZERO target
+                    labels: only hidden states and the fixed source layer enter.
+                    Unlike the others this layer depends on the pair and on the
+                    alignment dataset, so it lives in tgt_layers/, not the probe
+                    cache, and is produced by phase tgt_layer_cache.
+Non-default modes write a "_btl"/"_bbs"/"_b2a" filename infix, so runs never collide.
+Every mode still needs phase 1: the source probes and the eval labels come from
+the probe caches.  What best-to-align/-sub/-last change is only how Lt is chosen.
+
+Normalisation convention "D"
+---------------------------
+Every hidden state is z-scored before it touches an alignment or a probe, and WHICH
+dataset's pool statistics are used is a load-bearing choice, not a detail.  The two
+sides are not symmetric:
+
+  SOURCE side -- pinned to eval_ds, no freedom.  The frozen probe w_s was trained on
+    eval_ds-normalised source features at layer Ls, so R must produce vectors in that
+    same coordinate system or w_s is reading a scale it never saw.  This holds even
+    when the alignment rows come from another dataset: align_ds source features are
+    normalised with EVAL_ds statistics (at layer Ls).
+
+  TARGET side -- align_ds, at both fit and apply time.  R's input coordinate system
+    is free, but it must not change between phase 2 and phase 3; R is linear and has
+    no way to notice that its inputs were re-scaled.  So the target is normalised
+    with align_ds statistics everywhere the map is involved, including when phase 3
+    scores eval_ds rows through it.  Phase 2 stores those statistics IN the alignment
+    cache (mu_t_align/sd_t_align) and phase 3 reads them back, so fit and apply share
+    one array rather than two recomputations that have to agree.
+
+  The native target probe (curve A) is NOT map-related and keeps eval_ds statistics.
+  It is a baseline about the target model alone and must not move with align_ds.
+
+WHICH ROWS the statistics are taken over is a second, separate question, and the
+answer is always "the rows that side is allowed to see":
+  - eval_ds statistics (source at Ls, native target at Lt) use src_cache["pool"].
+    Under SPLIT_CONVENTION every model on a dataset holds out the SAME questions, so
+    the target cache's pool is the same row set and the choice is a formality.  It is
+    still written as src_cache's pool deliberately: src_cache's split is the one that
+    defines eval_idx, so this stays correct if a cache from the older per-model
+    scheme ever turns up (and _check_split_convention refuses that pairing anyway).
+  - align_ds target statistics use exactly the rows the map is fitted on
+    (`align_all`): src_cache's pool for same-align, the whole dataset for cross-align
+    (where no eval row exists to leak).
+
+Same-align (align_ds == eval_ds) collapses all of this to one set of statistics, so
+the convention is only visible in cross-align cells.  This matches the v1 script
+transfer_cross_align.py; the intermediate v2 code fitted the map in align_ds target
+coordinates but applied it in eval_ds ones, and additionally took the source's mu/sd
+from the align_ds cache's own best layer rather than from Ls.
 
 Nothing in this file imports or modifies any existing transfer.py code.
 
@@ -28,6 +90,7 @@ import pickle
 import re
 import sys
 import time
+import zlib
 from datetime import datetime
 
 import numpy as np
@@ -138,6 +201,307 @@ def _zscore(train, full):
     mu = train.mean(0)
     sd = train.std(0) + 1e-6
     return (full - mu) / sd, mu, sd
+
+
+# Normalisation convention "D" -- see the module docstring.  Recorded in every
+# alignment cache and target-layer selection so a stale artefact from the old
+# convention is refused instead of silently mixed in.
+NORM_CONVENTION = "D"
+
+# Split convention.  "per_dataset": the 500/1500 eval/pool split is a function of
+# (dataset, n_eval, seed) ALONE, so every model sharing a dataset gets the same
+# split.  Recorded in each probe cache; phases 2/3 refuse to mix a stamped cache
+# with an unstamped (per-model) one.
+SPLIT_CONVENTION = "per_dataset"
+
+
+def _dataset_split(ds, N, n_eval, seed):
+    """The eval/pool split for a dataset, identical for every model on it.
+
+    Historically this was one `rng.permutation(N)` per (dataset, model) drawn from a
+    single stream created outside the loop, so each model got a DIFFERENT split.
+    Every cache was internally consistent (its own pool excluded its own eval rows),
+    but across models the splits crossed: the target's 1500 pool rows contained ~368
+    of the source's 500 eval rows.  Since a transfer cell evaluates on the SOURCE
+    cache's eval rows, the target's supervised layer choice (best-to-best's
+    best_layer, best-to-best-sub's sub_best_layer) was made having seen ~74% resp.
+    ~7% of them with their labels.
+
+    Deriving the permutation from the dataset name instead removes the crossing at
+    the source: all models on a dataset now hold out the same questions, so "the
+    target's pool" and "the source's pool" are the same row set and no downstream
+    choice of row set can leak.  Nothing else about the split changes -- same size,
+    same seed, still a uniform random permutation.
+
+    crc32 rather than hash(): hash() is salted per process, which would make the
+    split irreproducible across runs -- the exact property this exists to provide.
+    """
+    stream = np.random.default_rng([int(seed), zlib.crc32(ds.encode("utf-8"))])
+    perm = stream.permutation(N)
+    return perm[:n_eval], perm[n_eval:]
+
+
+def _check_split_convention(sc, tc, pair_name, ds):
+    """Refuse to transfer between two caches whose splits disagree.
+
+    A pair only makes sense if both caches hold out the same questions; otherwise
+    the target's pool overlaps the eval rows this cell will be scored on.  Under
+    SPLIT_CONVENTION that is automatic, so this is a cheap assertion that the two
+    files really came from the same convention rather than one being a leftover
+    from an older tree that got copied in.
+    """
+    s_new = sc.get("split_convention") == SPLIT_CONVENTION
+    t_new = tc.get("split_convention") == SPLIT_CONVENTION
+    if s_new != t_new:
+        raise ValueError(
+            f"{pair_name} on {ds}: one probe cache uses split convention "
+            f"'{SPLIT_CONVENTION}' and the other does not.  Mixing per-model and "
+            f"per-dataset splits silently crosses the eval sets; re-run phase "
+            f"probe_cache --force for whichever tree is stale.")
+    if s_new and not np.array_equal(np.asarray(sc["eval_idx"]),
+                                    np.asarray(tc["eval_idx"])):
+        raise ValueError(
+            f"{pair_name} on {ds}: both caches claim split convention "
+            f"'{SPLIT_CONVENTION}' but their eval rows differ.  One of them was "
+            f"fitted with a different --n-eval or --seed.")
+
+
+def _layer_stats(cache, L):
+    """z-score statistics for layer `L` from a probe cache, on its own pool rows.
+
+    A cache's scalar `mu`/`sd` belong to `cache["best_layer"]` ALONE.  Every caller
+    that needs another layer must come through here; reading the scalar pair for a
+    different layer is exactly the mistake this function exists to prevent.
+
+    Use this for the SOURCE side only.  "Its own pool rows" is unambiguously right
+    there, because the source cache's pool is the split that defines eval_idx.  Under
+    SPLIT_CONVENTION the target's pool is now the same row set, so passing a target
+    cache would give the same answer -- but the target is still normalised from
+    hidden states over an explicit row set (see the module docstring), because the
+    align-dataset statistics need a row set this function cannot express, and because
+    a caller that reaches for `tc` should have to say which rows it means.
+    """
+    if "mu_all" not in cache:
+        raise KeyError(
+            f"probe cache for {cache['dataset']}/{cache['model']} predates the "
+            f"per-layer statistics (mu_all/sd_all).  Re-run phase probe_cache for "
+            f"it -- the layer search and the probes themselves are unchanged, the "
+            f"field is purely additive.")
+    return (np.array(cache["mu_all"][L], dtype=np.float64),
+            np.array(cache["sd_all"][L], dtype=np.float64))
+
+
+def _check_norm_convention(obj, eval_ds, align_ds, path):
+    """Refuse an artefact fitted under a different normalisation convention.
+
+    Same-align is exempt: when align_ds == eval_ds every convention picks the same
+    statistics, so such a file is valid regardless of which code wrote it.
+    """
+    if align_ds == eval_ds:
+        return
+    got = obj.get("norm_convention")
+    if got != NORM_CONVENTION:
+        raise ValueError(
+            f"{path} was fitted under normalisation convention {got!r}, but this "
+            f"code is convention {NORM_CONVENTION!r}.  Cross-align artefacts are "
+            f"not comparable across conventions -- delete it and re-run phase "
+            f"align_cache (and tgt_layer_cache for best-to-align).")
+
+
+def _sub_layer_search(H, y, pool, sub_n, n_folds):
+    """Pick a layer using only `sub_n` SE labels, scored by K-fold cross-validation.
+
+    Cheap counterpart to the full layer search in phase_probe_cache, which spends
+    the whole 1500-row pool (1050 train / 450 select).  Here the SAME sub_n rows
+    pay for both training and selection, so the label budget on the target side is
+    sub_n and nothing more.
+
+    No RNG of its own: the rows are simply `pool[:sub_n]`.  `pool` is already a
+    shuffled slice of the one permutation drawn in phase_probe_cache, so a prefix
+    of it is a random-but-fixed subset, it nests inside the `pool[:n]` probe
+    training sets, and nothing here can perturb the 500/1500 eval split that every
+    transfer-mode's results are compared on.
+
+    Two things must not leak:
+      - rows come from `pool` only, never from the held-out eval_idx;
+      - the z-score stats are fit per fold on that fold's train rows.  Using all
+        sub_n rows would let each validation fold inform its own normalisation,
+        which inflates small-budget scores -- exactly the effect under test.
+
+    Selection metric is the pooled out-of-fold AUROC over all sub_n rows rather
+    than the mean of per-fold AUROCs: with sub_n=150 a fold holds 30 rows, whose
+    AUROC carries ~0.1 of noise.  Fold decision scores are standardised before
+    pooling because LogisticRegression margins are not calibrated across fits.
+
+    Returns (best_layer, best_auc, layer_aucs, sub_idx).
+    """
+    n_layers = H.shape[0]
+    sub_idx = pool[:sub_n]
+    y_sub = y[sub_idx]
+
+    # Stratified round-robin over pool order: with a ~50/50 SE split a contiguous
+    # block split could hand a 30-row fold a single class, making its AUROC
+    # undefined.  Deterministic -- pool order is already the shuffle.
+    folds = np.empty(len(sub_idx), dtype=int)
+    for cls in np.unique(y_sub):
+        cls_pos = np.flatnonzero(y_sub == cls)
+        folds[cls_pos] = np.arange(len(cls_pos)) % n_folds
+
+    layer_aucs = []
+    for L in tqdm(range(n_layers), desc=f"  sub layers (n={sub_n})", ncols=80):
+        X = H[L][sub_idx].astype(np.float64)
+        oof = np.full(len(sub_idx), np.nan)
+        for f in range(n_folds):
+            va = folds == f
+            tr = ~va
+            if len(np.unique(y_sub[tr])) < 2:
+                continue
+            mu, sd = X[tr].mean(0), X[tr].std(0) + 1e-6
+            Xz = (X - mu) / sd
+            clf = LogisticRegression(max_iter=1000).fit(Xz[tr], y_sub[tr])
+            s = clf.decision_function(Xz[va])
+            oof[va] = (s - s.mean()) / (s.std() + 1e-12)
+        ok = ~np.isnan(oof)
+        if ok.sum() < 2 or len(np.unique(y_sub[ok])) < 2:
+            layer_aucs.append(0.5)
+            continue
+        layer_aucs.append(float(roc_auc_score(y_sub[ok], oof[ok])))
+
+    best_layer = int(np.argmax(layer_aucs))
+    return best_layer, layer_aucs[best_layer], layer_aucs, sub_idx
+
+
+def _align_layer_search(Xt_all, Zs, rows, tgt_stats, aligner, alpha, holdout,
+                        stride, seed):
+    """Pick a target layer with NO target SE labels, by alignment fit quality.
+
+    For every candidate target layer L we fit the alignment R: h_t -> h_s on a
+    subset of `rows` and score it by the held-out reconstruction error
+    ||R(h_t) - h_s||^2.  The source layer is fixed, so the comparison across L
+    is a comparison of how linearly predictable the (fixed) source
+    representation is from each target layer.  Nothing here touches y or the
+    entropies, which is the whole point: best-to-best-sub spends --sub-n target
+    labels on this decision, this mode spends zero.
+
+    Scored out-of-sample (a random `holdout` fraction of `rows`) rather than in
+    sample: every layer has the same d and the same n, but their covariance
+    spectra differ, so a fixed ridge alpha buys different effective degrees of
+    freedom per layer and the in-sample residual would systematically favour the
+    worse-conditioned ones.
+
+    `tgt_stats(L)` supplies the (mu, sd) for candidate layer L.  It is injected
+    rather than computed here so that the layer chosen is scored in exactly the
+    coordinate system phases 2 and 3 will later fit and apply the map in -- under
+    convention D that is the align dataset's pool statistics at layer L.  Deriving
+    them from `rows` locally instead would make the selection criterion disagree
+    with the criterion the selected layer is then used under.
+
+    Returns (best_layer, rel_resid, seconds) where rel_resid[L] is the held-out
+    error normalised by ||Zs_ho||^2 (nan for layers skipped by `stride`).
+    """
+    n_layers = Xt_all.shape[0]
+    cands = sorted(set(list(range(0, n_layers, max(1, stride))) + [n_layers - 1]))
+
+    rows = np.asarray(rows)
+    rng = np.random.RandomState(seed)
+    perm = rng.permutation(len(rows))
+    n_ho = max(1, int(round(holdout * len(rows))))
+    ho, fit = rows[perm[:n_ho]], rows[perm[n_ho:]]
+
+    Zs_fit, Zs_ho = Zs[fit], Zs[ho]
+    denom = float(np.mean(Zs_ho ** 2))
+
+    rel_resid = [float("nan")] * n_layers
+    t0 = time.time()
+    for L in tqdm(cands, desc=f"  align layers ({aligner})", ncols=80):
+        Xt = Xt_all[L].astype(np.float64)
+        mu, sd = tgt_stats(L)
+        Zt = (Xt - mu) / sd
+        if aligner == "procrustes":
+            M, b = _fit_procrustes(Zt[fit], Zs_fit)
+        else:
+            M, b = _fit_ridge(Zt[fit], Zs_fit, alpha=alpha)
+        err = float(np.mean((Zt[ho] @ M + b - Zs_ho) ** 2))
+        rel_resid[L] = err / denom
+    seconds = round(time.time() - t0, 2)
+
+    best_layer = int(min(cands, key=lambda L: rel_resid[L]))
+    return best_layer, rel_resid, seconds
+
+
+def _tgt_layer_sel_path(out_dir, eval_ds, pair_name, align_ds, transfer_mode):
+    """Where phase tgt_layer_cache writes / phases 2-3 read the chosen layer."""
+    return os.path.join(out_dir, "tgt_layers", eval_ds, pair_name,
+                        f"{align_ds}{_mode_suffix(transfer_mode)}.json")
+
+
+def _read_tgt_layer_sel(out_dir, eval_ds, pair_name, align_ds, transfer_mode):
+    """Load the label-free layer choice, or raise with the command to produce it."""
+    path = _tgt_layer_sel_path(out_dir, eval_ds, pair_name, align_ds, transfer_mode)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"missing target-layer selection {path}; run phase tgt_layer_cache "
+            f"with --transfer-mode {transfer_mode} first")
+    sel = _load_json(path)
+    _check_norm_convention(sel, eval_ds, align_ds, path)
+    return sel
+
+
+def _load_align_pair_hidden(out_dir, align_ds, src_model, tgt_model, token):
+    """Load both models' hidden states on the ALIGNMENT dataset, rows id-aligned.
+
+    Shared by phases 1.5 and 2 so they cannot disagree on row order.  The gen
+    paths come from the align_ds probe caches, which is also how phase 2 has
+    always resolved them.
+
+    Returns (src_align_cache, tgt_align_cache, H_src, H_tgt, order) with H_tgt
+    already permuted into the source's row order.
+    """
+    caches = []
+    for model in (src_model, tgt_model):
+        path = os.path.join(out_dir, "probes", align_ds, f"{model}.pkl")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"missing align probe cache {path}")
+        with open(path, "rb") as f:
+            caches.append(pickle.load(f))
+    src_align_cache, tgt_align_cache = caches
+
+    H_src, ids_src = _load_hidden(src_align_cache["gen_path"], token)
+    H_tgt, ids_tgt = _load_hidden(tgt_align_cache["gen_path"], token)
+    order = _align_ids(ids_src, ids_tgt)
+    return src_align_cache, tgt_align_cache, H_src, H_tgt[:, order], order
+
+
+def _ensure_sub_best_layer(cache, cache_path, args, H=None):
+    """Add sub_best_layer to an existing probe cache, recomputing only if stale.
+
+    Phase 1 fills this in as it goes; for probe caches written before this mode
+    existed (or copied in from another run) the key is backfilled here on first
+    use.  Loading the hidden states is the only real cost -- the search itself is
+    n_layers * n_folds logistic fits on sub_n rows.
+    """
+    fresh = (cache.get("sub_best_layer") is not None
+             and cache.get("sub_n") == args.sub_n
+             and cache.get("sub_folds") == args.sub_folds)
+    if fresh:
+        return cache
+
+    print(f"  [sub-layer] computing for {cache['dataset']}/{cache['model']} "
+          f"(n={args.sub_n}, {args.sub_folds}-fold)")
+    if H is None:
+        H, _ = _load_hidden(cache["gen_path"], cache["token"])
+    L, auc, aucs, sub_idx = _sub_layer_search(
+        H, np.array(cache["y"]), np.array(cache["pool"]),
+        args.sub_n, args.sub_folds)
+    print(f"  [sub-layer] -> layer {L}  OOF AUROC {auc:.3f}  "
+          f"(full-budget best layer was {cache['best_layer']})")
+
+    cache.update({"sub_best_layer": L, "sub_best_auc": float(auc),
+                  "sub_layer_aucs": aucs, "sub_idx": sub_idx.tolist(),
+                  "sub_n": args.sub_n, "sub_folds": args.sub_folds})
+    with open(cache_path, "wb") as f:
+        pickle.dump(cache, f)
+    return cache
 
 
 def _fit_ridge(Zt, Zs, alpha=1e3):
@@ -274,15 +638,34 @@ def _build_hyperparams(args):
 
 
 def _tgt_layer(tc, transfer_mode):
-    """Return the target layer index to use for alignment and evaluation."""
+    """Return the target layer index to use for alignment and evaluation.
+
+    Phases 2 and 3 are separate invocations that must agree on this index, so it
+    is always read from the probe cache, never recomputed here.
+    """
+    if transfer_mode == "best-to-align":
+        raise ValueError(
+            "best-to-align's target layer is per (pair, eval_ds, align_ds), not "
+            "per (model, dataset): read it with _read_tgt_layer_sel, not _tgt_layer")
     if transfer_mode == "best-to-last":
         return len(tc["layer_aucs"]) - 1
+    if transfer_mode == "best-to-best-sub":
+        if tc.get("sub_best_layer") is None:
+            raise KeyError(
+                f"probe cache for {tc['dataset']}/{tc['model']} has no "
+                f"sub_best_layer; run phase probe_cache with "
+                f"--transfer-mode best-to-best-sub first")
+        return tc["sub_best_layer"]
     return tc["best_layer"]
+
+
+_MODE_SUFFIX = {"best-to-last": "_btl", "best-to-best-sub": "_bbs",
+                "best-to-align": "_b2a"}
 
 
 def _mode_suffix(transfer_mode):
     """Short filename suffix that distinguishes non-default transfer modes."""
-    return "_btl" if transfer_mode == "best-to-last" else ""
+    return _MODE_SUFFIX.get(transfer_mode, "")
 
 
 def _load_timing(out_dir):
@@ -321,7 +704,11 @@ def phase_probe_cache(args):
     n_eval = args.n_eval
     seed = args.seed
     token = args.token
-    rng = np.random.default_rng(seed)
+    # No shared rng across entries any more: the split now comes from
+    # _dataset_split(), which is a pure function of (dataset, N, n_eval, seed).  A
+    # single stream advancing over the model loop is exactly what made every model's
+    # split different -- and made the order in which models were processed part of
+    # the experiment's definition.
 
     model_path_map = _load_model_paths(args.model_paths)
     entries = []
@@ -337,6 +724,13 @@ def phase_probe_cache(args):
         out_path = os.path.join(args.out_dir, "probes", ds, f"{model}.pkl")
         if os.path.exists(out_path) and not args.force:
             print(f"[probe_cache] skip {ds}/{model} (exists)")
+            # The sub-budget layer is the one thing a pre-existing cache may be
+            # missing: it was added after the first runs, and BTL/BBB runs reuse
+            # (or symlink) those caches wholesale.  Backfill it in place.
+            if args.transfer_mode == "best-to-best-sub":
+                with open(out_path, "rb") as f:
+                    cache = pickle.load(f)
+                _ensure_sub_best_layer(cache, out_path, args)
             continue
 
         print(f"\n[probe_cache] {ds} / {model}")
@@ -347,9 +741,10 @@ def phase_probe_cache(args):
         ent = _load_entropy(gen_path)
         y = _binarize(ent, _best_split(ent))
 
-        perm = rng.permutation(N)
-        eval_idx = perm[:n_eval]
-        pool = perm[n_eval:]
+        # Same held-out questions for every model on this dataset -- see
+        # _dataset_split().  This is what makes `pool` a leak-free row set for the
+        # PAIR and not merely for this cache.
+        eval_idx, pool = _dataset_split(ds, N, n_eval, seed)
 
         # Layer search on full pool
         print(f"  layer search ({n_layers} layers, {len(pool)} pool samples)")
@@ -378,6 +773,21 @@ def phase_probe_cache(args):
         # Extract best-layer features and z-score
         X_best = H[best_layer].astype(np.float64)
         Xz_best, mu_best, sd_best = _zscore(X_best[pool], X_best)
+
+        # Pool statistics for EVERY layer, not just the best one.  Alignment work
+        # routinely needs a layer other than this cache's best_layer (the source at
+        # the eval dataset's best layer, the target at whatever --transfer-mode
+        # picked, every candidate layer during a best-to-align search), and mu/sd
+        # are per-layer quantities.  Caching only the best layer's pair is what let
+        # phase 2 silently normalise layer 46 features with layer 29 statistics.
+        # 49 layers x 3840 dims x 8 bytes is ~1.5 MB, so store them all and make
+        # that class of mistake unrepresentable.
+        mu_all = np.empty((n_layers, d), dtype=np.float64)
+        sd_all = np.empty((n_layers, d), dtype=np.float64)
+        for L in range(n_layers):
+            X_L = H[L].astype(np.float64)
+            mu_all[L] = X_L[pool].mean(0)
+            sd_all[L] = X_L[pool].std(0) + 1e-6
 
         # Fit probes at each n_grid size.  Time each fit separately: the reported
         # probe_fit_s must be the cost of training ONE probe at the largest n, not
@@ -424,8 +834,14 @@ def phase_probe_cache(args):
             "best_layer": int(best_layer),
             "best_auc": float(best_auc),
             "src_eval_auc": float(src_eval_auc),
+            # Which split rule produced eval_idx/pool.  Unstamped caches are the old
+            # per-model splits; _check_split_convention() refuses to pair the two.
+            "split_convention": SPLIT_CONVENTION,
             "mu": mu_best.tolist(),
             "sd": sd_best.tolist(),
+            # per-layer pool statistics; mu_all[best_layer] == mu by construction
+            "mu_all": mu_all,
+            "sd_all": sd_all,
             "probe_full": {
                 "coef": clf_full.coef_.ravel().tolist(),
                 "intercept": float(clf_full.intercept_[0]),
@@ -444,6 +860,11 @@ def phase_probe_cache(args):
         with open(out_path, "wb") as f:
             pickle.dump(cache, f)
         print(f"  -> saved {out_path}")
+
+        # Sub-budget layer, computed while H is still resident.  Harmless for the
+        # other modes -- it only adds keys nothing else reads.
+        if args.transfer_mode == "best-to-best-sub":
+            _ensure_sub_best_layer(cache, out_path, args, H=H)
 
 
 # ============================================================================
@@ -523,6 +944,117 @@ def _resolve_pairs(args):
 
 
 # ============================================================================
+# Phase 1.5: tgt_layer_cache  (best-to-align only)
+# ============================================================================
+# Cache structure (one json per pair + eval_ds + align_ds):
+#   <cache_dir>/tgt_layers/<eval_ds>/<src_model>_to_<tgt_model>/<align_ds>_b2a.json
+# Phases 2 and 3 both read tgt_best_layer from here, so they cannot disagree,
+# and an aligner sweep (ridge / procrustes / alphas) never re-pays for it.
+
+def phase_tgt_layer_cache(args):
+    """Pick each pair's target layer without spending a single target SE label.
+
+    Only meaningful for --transfer-mode best-to-align; the other modes key their
+    layer on (model, dataset) and get it from the probe cache in phase 1.
+
+    This does NOT replace phase 1: phase 3 still needs the source probes and the
+    eval labels from the probe caches.  What it replaces is phase 1's *labelled
+    target layer search* as the thing that decides Lt.
+    """
+    if args.transfer_mode != "best-to-align":
+        raise ValueError(
+            f"phase tgt_layer_cache only applies to --transfer-mode best-to-align "
+            f"(got {args.transfer_mode}); other modes read their layer from the "
+            f"probe cache")
+
+    pairs = _resolve_pairs(args)
+    n_pairs = len(pairs)
+
+    for i, (src_model, _sg, tgt_model, _tg, eval_ds, align_ds) in enumerate(pairs, 1):
+        prog = f"{i}/{n_pairs}"
+        pair_name = f"{src_model}_to_{tgt_model}"
+        out_path = _tgt_layer_sel_path(args.out_dir, eval_ds, pair_name, align_ds,
+                                       args.transfer_mode)
+        if os.path.exists(out_path) and not args.force:
+            sel = _load_json(out_path)
+            print(f"[tgt_layer {prog}] skip {pair_name} eval={eval_ds} "
+                  f"align={align_ds} (exists, layer {sel['tgt_best_layer']})")
+            continue
+
+        print(f"\n[tgt_layer {prog}] {pair_name}  eval={eval_ds}  align={align_ds}")
+
+        # Ls and the leak-free row set both come from the EVAL-dataset source
+        # probe cache, exactly as in phase 2.
+        src_probe_path = os.path.join(args.out_dir, "probes", eval_ds, f"{src_model}.pkl")
+        if not os.path.exists(src_probe_path):
+            print(f"  ERROR: missing probe cache {src_probe_path}")
+            continue
+        with open(src_probe_path, "rb") as f:
+            src_cache = pickle.load(f)
+        Ls = src_cache["best_layer"]
+
+        try:
+            _src_align_cache, _tgt_align_cache, H_src_align, H_tgt_align, _order = \
+                _load_align_pair_hidden(args.out_dir, align_ds, src_model,
+                                        tgt_model, args.token)
+        except FileNotFoundError as e:
+            print(f"  ERROR: {e}")
+            continue
+
+        # Same row set phase 2 fits on: eval_ds's pool when the alignment data IS
+        # the eval data (so the phase-3 eval rows stay untouched), all rows
+        # otherwise.  See the comment in phase_align_cache.
+        Xs_align = H_src_align[Ls].astype(np.float64)
+        if align_ds == eval_ds:
+            rows = np.array(src_cache["pool"])
+        else:
+            rows = np.arange(Xs_align.shape[0])
+        if args.align_sel_n:
+            rows = rows[:args.align_sel_n]
+
+        # Convention D, exactly as in phase 2: source statistics from the EVAL probe
+        # cache at Ls (w_s's coordinate system), target statistics from the ALIGN
+        # dataset over `rows` at each candidate layer -- the same rows the trial
+        # alignments are fitted on, so a layer is scored in the coordinate system it
+        # would actually be used in, and no eval row informs its own scale.
+        mu_sa, sd_sa = _layer_stats(src_cache, Ls)
+        Zs_align = (Xs_align - mu_sa) / sd_sa
+
+        def tgt_stats(L, _H=H_tgt_align, _rows=rows):
+            X = _H[L][_rows].astype(np.float64)
+            return X.mean(0), X.std(0) + 1e-6
+
+        print(f"  src layer {Ls}, {len(rows)} selection rows, "
+              f"{args.align_sel_aligner}, holdout {args.align_sel_holdout}")
+        Lt, rel_resid, seconds = _align_layer_search(
+            H_tgt_align, Zs_align, rows, tgt_stats,
+            aligner=args.align_sel_aligner, alpha=args.alpha,
+            holdout=args.align_sel_holdout, stride=args.align_sel_stride,
+            seed=args.seed)
+        print(f"  -> tgt layer {Lt}  held-out rel. residual {rel_resid[Lt]:.4f}  "
+              f"({seconds}s)")
+
+        _save_json(out_path, {
+            "src_model": src_model, "tgt_model": tgt_model,
+            "eval_ds": eval_ds, "align_ds": align_ds,
+            "transfer_mode": args.transfer_mode,
+            "norm_convention": NORM_CONVENTION,
+            "src_layer": Ls,
+            "tgt_best_layer": Lt,
+            "layer_rel_resid": rel_resid,
+            "n_sel_rows": int(len(rows)),
+            "sel_aligner": args.align_sel_aligner,
+            "sel_alpha": args.alpha,
+            "sel_holdout": args.align_sel_holdout,
+            "sel_stride": args.align_sel_stride,
+            "sel_seed": args.seed,
+            "target_labels_used": 0,
+            "select_s": seconds,
+        })
+        print(f"  -> saved {out_path}")
+
+
+# ============================================================================
 # Phase 2: align_cache
 # ============================================================================
 # Cache structure:
@@ -572,39 +1104,42 @@ def phase_align_cache(args):
             src_cache = pickle.load(f)
         with open(tgt_probe_path, "rb") as f:
             tgt_cache = pickle.load(f)
+        _check_split_convention(src_cache, tgt_cache, pair_name, eval_ds)
 
         Ls = src_cache["best_layer"]
-        Lt = _tgt_layer(tgt_cache, args.transfer_mode)
+        # best-to-align's layer is per (pair, eval_ds, align_ds) and was chosen
+        # label-free in phase tgt_layer_cache; every other mode's is per
+        # (model, dataset) and lives in the probe cache.
+        if args.transfer_mode == "best-to-align":
+            try:
+                tgt_sel = _read_tgt_layer_sel(args.out_dir, eval_ds, pair_name,
+                                              align_ds, args.transfer_mode)
+            except FileNotFoundError as e:
+                print(f"  ERROR: {e}")
+                continue
+            if tgt_sel["src_layer"] != Ls:
+                print(f"  ERROR: {pair_name} layer selection was made for src layer "
+                      f"{tgt_sel['src_layer']} but probe cache now says {Ls}; "
+                      f"rerun tgt_layer_cache --force")
+                continue
+            Lt = tgt_sel["tgt_best_layer"]
+        else:
+            tgt_sel = None
+            Lt = _tgt_layer(tgt_cache, args.transfer_mode)
 
         print(f"\n[align_cache {prog}] {pair_name}  eval={eval_ds}  align={align_ds}")
-        print(f"  src best layer: {Ls}  tgt best layer: {Lt}")
+        print(f"  src best layer: {Ls}  tgt layer: {Lt} ({args.transfer_mode})")
 
-        # Load alignment hidden states
-        # For same-dataset alignment, align_gen = eval_gen (src/tgt gen paths).
-        # We need the gen paths for the alignment dataset.
-        # These are passed via --align-gen-map file or we resolve from cache.
-        # We resolve: look up the probe cache for align_ds
-        src_align_probe_path = os.path.join(
-            args.out_dir, "probes", align_ds, f"{src_model}.pkl")
-        tgt_align_probe_path = os.path.join(
-            args.out_dir, "probes", align_ds, f"{tgt_model}.pkl")
-        if not os.path.exists(src_align_probe_path):
-            print(f"  ERROR: missing align probe cache {src_align_probe_path}")
-            continue
-        if not os.path.exists(tgt_align_probe_path):
-            print(f"  ERROR: missing align probe cache {tgt_align_probe_path}")
-            continue
-        with open(src_align_probe_path, "rb") as f:
-            src_align_cache = pickle.load(f)
-        with open(tgt_align_probe_path, "rb") as f:
-            tgt_align_cache = pickle.load(f)
-
-        # Load raw hidden states for alignment dataset at the best layers
+        # Load alignment hidden states for both models, rows id-aligned.  The gen
+        # paths come from the align_ds probe caches.
         print(f"  loading align hidden states ({align_ds})")
-        H_src_align, ids_src_align = _load_hidden(src_align_cache["gen_path"], token)
-        H_tgt_align, ids_tgt_align = _load_hidden(tgt_align_cache["gen_path"], token)
-        order_align = _align_ids(ids_src_align, ids_tgt_align)
-        H_tgt_align = H_tgt_align[:, order_align]
+        try:
+            src_align_cache, tgt_align_cache, H_src_align, H_tgt_align, order_align = \
+                _load_align_pair_hidden(args.out_dir, align_ds, src_model,
+                                        tgt_model, token)
+        except FileNotFoundError as e:
+            print(f"  ERROR: {e}")
+            continue
 
         Xs_align = H_src_align[Ls].astype(np.float64)
         Xt_align = H_tgt_align[Lt].astype(np.float64)
@@ -629,16 +1164,22 @@ def phase_align_cache(args):
         # which is now pool size, not the dataset row count.
         N_align = len(align_all)
 
-        # Z-score using pool stats from probe cache (same 1500-example stats as Phase 3).
-        # For best-to-last the stored stats are for the best layer, so recompute at Lt.
-        mu_sa = np.array(src_align_cache["mu"])
-        sd_sa = np.array(src_align_cache["sd"])
-        if args.transfer_mode == "best-to-last":
-            mu_ta = Xt_align[align_all].mean(0)
-            sd_ta = Xt_align[align_all].std(0) + 1e-6
-        else:
-            mu_ta = np.array(tgt_align_cache["mu"])
-            sd_ta = np.array(tgt_align_cache["sd"])
+        # Convention D (module docstring).  Source statistics come from the EVAL
+        # dataset at layer Ls, because that is the coordinate system the frozen probe
+        # w_s reads.  Target statistics come from the ALIGN dataset at layer Lt, over
+        # `align_all` -- the very rows the map is fitted on, so they inherit that row
+        # set's leak-freedom instead of needing their own argument: for same-align
+        # that is src_cache's pool (eval rows excluded), for cross-align the whole
+        # dataset (no eval rows exist in it).  Using the target probe cache's own
+        # pool instead would be wrong regardless of SPLIT_CONVENTION: for cross-align
+        # tc's pool indexes the EVAL dataset's rows, which say nothing about the align
+        # dataset's row space.  Both arrays are stored in the
+        # alignment cache below so phase 3 applies the map in the coordinate system
+        # it was fitted in by construction, not by recomputing and hoping to agree.
+        # Unsupervised, so the label budget is unchanged.
+        mu_sa, sd_sa = _layer_stats(src_cache, Ls)
+        mu_ta = Xt_align[align_all].mean(0)
+        sd_ta = Xt_align[align_all].std(0) + 1e-6
         Zs_align = (Xs_align - mu_sa) / sd_sa
         Zt_align = (Xt_align - mu_ta) / sd_ta
 
@@ -667,7 +1208,25 @@ def phase_align_cache(args):
                 "aligner": aligner, "aligner_tag": tag,
                 "src_best_layer": Ls, "tgt_best_layer": Lt,
                 "N_align": N_align, "n_grid": valid_grid,
+                "transfer_mode": args.transfer_mode,
+                "norm_convention": NORM_CONVENTION,
+                # The map's input coordinate system, shipped with the map.  Phase 3
+                # reads these rather than recomputing: it does not load the align
+                # dataset's hidden states at all, and even if it did, "recompute the
+                # same thing in two places" is how the fit/apply mismatch happened.
+                "mu_t_align": mu_ta, "sd_t_align": sd_ta,
+                # ... and the output coordinate system, where w_s lives.  Redundant
+                # with the probe cache, kept so phase 3 can assert agreement.
+                "mu_s_eval": mu_sa, "sd_s_eval": sd_sa,
             }
+            if tgt_sel is not None:
+                # Carry the label-free layer choice along so a results file is
+                # self-describing without re-reading the tgt_layers json.
+                alignment["tgt_layer_sel"] = {
+                    k: tgt_sel[k] for k in
+                    ("sel_aligner", "sel_alpha", "sel_holdout", "sel_stride",
+                     "n_sel_rows", "target_labels_used", "select_s")
+                }
             # Time each n separately: the reported cost must be ONE alignment fit at
             # the largest n, not the sum over the grid.  Ridge is dominated by the
             # d^3 solve and is nearly n-independent, so the grid total is ~5x the
@@ -731,6 +1290,10 @@ def phase_align_cache(args):
             print(f"  -> saved {out_path}  (fit n={n_reported}: {fit_s}s, "
                   f"whole grid: {grid_s}s)")
 
+            # best-to-align pays a one-off layer-selection cost before any of this;
+            # it belongs in the transfer budget, so surface it next to the fit time.
+            if tgt_sel is not None:
+                ds_timing["tgt_layer_select_s"] = tgt_sel["select_s"]
             ds_timing[tag] = fit_s
             ds_timing[f"{tag}_n"] = n_reported
             ds_timing[f"{tag}_per_n_s"] = per_n_s
@@ -771,6 +1334,7 @@ def phase_evaluate(args):
             sc = pickle.load(f)
         with open(tgt_probe_path, "rb") as f:
             tc = pickle.load(f)
+        _check_split_convention(sc, tc, pair_name, eval_ds)
 
         # Load alignment caches — one file per aligner+hyperparam combo
         pair_align_dir = os.path.join(args.out_dir, "alignments", eval_ds, pair_name)
@@ -784,11 +1348,40 @@ def phase_evaluate(args):
             if os.path.exists(p):
                 with open(p, "rb") as f:
                     align_caches[a] = pickle.load(f)
+                _check_norm_convention(align_caches[a], eval_ds, align_ds, p)
                 available_aligners.append(a)
         if not available_aligners:
             print(f"  ERROR: no alignment cache found in {pair_align_dir}")
             continue
-        # use first available cache for metadata (layers, N_align, n_grid)
+
+        # ---- skip cells whose outputs already exist ------------------------
+        # Every other phase is idempotent; phase 3 used to recompute
+        # unconditionally, and it is not cheap -- it loads BOTH models' full
+        # hidden-state tensors per cell.  Being able to skip matters because
+        # same-align results seeded from an earlier run are still valid
+        # (align_ds == eval_ds collapses every normalisation convention onto
+        # the same statistics), so a seeded run should pay only for the
+        # cross-align cells it actually has to redo.  --force overrides.
+        # Both the aligner-dependent files and the aligner-independent native
+        # ones must be present: native_curves is written on the first cell of a
+        # pair, so a cell can have its probe_grid while the native files are
+        # still missing.
+        _hyper_suffix = "_".join(_aligner_tag(a, hyperparams.get(a, {}))
+                                 for a in available_aligners)
+        _want = [
+            os.path.join(results_dir, eval_ds, pair_name, f)
+            for f in (f"probe_grid{mode_sfx}_align_{align_ds}_{_hyper_suffix}.json",
+                      f"predictions{mode_sfx}_align_{align_ds}_{_hyper_suffix}.json",
+                      f"native_curves{mode_sfx}_{eval_ds}.json",
+                      f"native_preds{mode_sfx}_{eval_ds}.json")
+        ]
+        if not args.force and all(os.path.exists(f) for f in _want):
+            print(f"  skip {pair_name} eval={eval_ds} align={align_ds} "
+                  f"({_hyper_suffix}): outputs exist")
+            continue
+
+        # use first available cache for metadata (layers, N_align, n_grid) and, under
+        # convention D, for the coordinate system the map was fitted in
         ac = align_caches[available_aligners[0]]
 
         # Reconstruct eval features from cached z-score stats
@@ -798,28 +1391,79 @@ def phase_evaluate(args):
         order = _align_ids(ids_src, ids_tgt)
         H_tgt = H_tgt[:, order]
 
-        Ls, Lt = sc["best_layer"], _tgt_layer(tc, args.transfer_mode)
+        Ls = sc["best_layer"]
+        if args.transfer_mode == "best-to-align":
+            # Read the same json phase 2 read, not ac["tgt_best_layer"], so the two
+            # phases have one shared source of truth even across aligner sweeps.
+            Lt = _read_tgt_layer_sel(args.out_dir, eval_ds, pair_name, align_ds,
+                                     args.transfer_mode)["tgt_best_layer"]
+            stale = [a for a in available_aligners
+                     if align_caches[a]["tgt_best_layer"] != Lt]
+            if stale:
+                raise ValueError(
+                    f"{pair_name} eval={eval_ds} align={align_ds}: alignment caches "
+                    f"{stale} were fit at target "
+                    f"layer {align_caches[stale[0]]['tgt_best_layer']} but the "
+                    f"selection now says {Lt}; rerun align_cache --force")
+        else:
+            Lt = _tgt_layer(tc, args.transfer_mode)
         eval_idx = np.array(sc["eval_idx"])
         pool = np.array(sc["pool"])
         ys = np.array(sc["y"])
         yt = np.array(tc["y"])[order]
 
-        mu_s = np.array(sc["mu"])
-        sd_s = np.array(sc["sd"])
-
         Xs = H_src[Ls].astype(np.float64)
         Xt = H_tgt[Lt].astype(np.float64)
-        # For best-to-last the stored stats are for the best layer; recompute at Lt.
-        if args.transfer_mode == "best-to-last":
-            mu_t = Xt[pool].mean(0)
-            sd_t = Xt[pool].std(0) + 1e-6
-        else:
-            mu_t = np.array(tc["mu"])
-            sd_t = np.array(tc["sd"])
-        Zs = (Xs - mu_s) / sd_s
-        Zt = (Xt - mu_t) / sd_t
 
-        Zt_eval = Zt[eval_idx]
+        # Convention D (module docstring).  The target gets TWO normalisations here,
+        # because two different things consume it:
+        #   Zt_map    -- align_ds statistics, the coordinate system phase 2 fitted R
+        #                in.  Feeding R eval_ds-normalised inputs instead would hand
+        #                a linear map a silently rescaled input.
+        #   Zt_native -- eval_ds statistics.  The native target probe is a baseline
+        #                about the target model alone; it must not shift when the
+        #                alignment corpus changes.
+        # The source has only one: eval_ds at Ls, where w_s lives.
+        #
+        # Both eval-side statistics are taken over `pool`, i.e. src_cache's split.
+        # Under SPLIT_CONVENTION tc's pool is the same row set, so this is no longer
+        # load-bearing -- but sc's split is the one that DEFINES eval_idx, so keeping
+        # it as the single source of truth means the eval rows cannot set their own
+        # scale even if a cache from the old per-model scheme were handed in.
+        mu_s, sd_s = _layer_stats(sc, Ls)
+        mu_tn = Xt[pool].mean(0)
+        sd_tn = Xt[pool].std(0) + 1e-6
+        # The map's input coordinates come from the alignment cache itself, so fit
+        # and apply cannot drift apart.  Any aligner in this cell was fitted on the
+        # same rows in the same coordinates, so the first one's copy speaks for all.
+        if "mu_t_align" in ac:
+            mu_tm = np.asarray(ac["mu_t_align"], dtype=np.float64)
+            sd_tm = np.asarray(ac["sd_t_align"], dtype=np.float64)
+        elif align_ds == eval_ds:
+            # A same-align cache seeded from a run that predates these fields.  Not a
+            # guess: with align_ds == eval_ds the alignment rows ARE `pool` and the
+            # alignment layer IS Lt, so the statistics phase 2 used are exactly the
+            # ones just computed above -- the same rows of the same tensor.
+            mu_tm, sd_tm = mu_tn, sd_tn
+        else:
+            raise ValueError(
+                f"{p} carries no mu_t_align, so the coordinate system it was fitted "
+                f"in is unrecoverable (phase 3 does not load {align_ds}'s hidden "
+                f"states).  Rerun align_cache --force for this cell.")
+        if "mu_s_eval" in ac and not (
+                np.array_equal(np.asarray(ac["mu_s_eval"], dtype=np.float64), mu_s)
+                and np.array_equal(np.asarray(ac["sd_s_eval"], dtype=np.float64), sd_s)):
+            raise ValueError(
+                f"{pair_name} eval={eval_ds} align={align_ds}: the alignment cache's "
+                f"source coordinates differ from the probe cache's at layer {Ls}.  "
+                f"The probe cache has been refitted since phase 2 ran; rerun "
+                f"align_cache --force for this cell.")
+        Zs = (Xs - mu_s) / sd_s
+        Zt_map = (Xt - mu_tm) / sd_tm
+        Zt_native = (Xt - mu_tn) / sd_tn
+
+        Zt_eval = Zt_map[eval_idx]
+        Zt_native_eval = Zt_native[eval_idx]
         yt_eval = yt[eval_idx]
         src_eval_auc = sc["src_eval_auc"]
 
@@ -840,8 +1484,7 @@ def phase_evaluate(args):
         }
 
         # load source eval hidden states for src_probe_pred and src AUROC curve
-        Zs_eval = (Xs - mu_s) / sd_s
-        Zs_eval = Zs_eval[np.array(sc["eval_idx"])]
+        Zs_eval = Zs[eval_idx]
         ys_eval = ys[eval_idx]
 
         # ---- check if aligner-independent native files already exist ----
@@ -889,13 +1532,14 @@ def phase_evaluate(args):
                     native_curves["curveA_native"].append(None)
                     tgt_probe_pred = None
                 else:
-                    clf = LogisticRegression(max_iter=1000).fit(Zt[sub], yt[sub])
+                    clf = LogisticRegression(max_iter=1000).fit(Zt_native[sub], yt[sub])
                     # time only the predict (inference), not the fit
                     _t0 = time.time()
-                    au = roc_auc_score(yt_eval, clf.predict_proba(Zt_eval)[:, 1])
+                    au = roc_auc_score(yt_eval,
+                                       clf.predict_proba(Zt_native_eval)[:, 1])
                     native_inference_by_n[n] = round(time.time() - _t0, 4)
                     native_curves["curveA_native"].append(float(au))
-                    tgt_probe_pred = clf.predict(Zt_eval).tolist()
+                    tgt_probe_pred = clf.predict(Zt_native_eval).tolist()
                 native_preds["by_n"][str(n)] = {"tgt_probe_pred": tgt_probe_pred}
 
             # Curve B: source probe of size n transferred through fixed alignment
@@ -961,7 +1605,7 @@ def phase_evaluate(args):
             _aligner_tag(a, hyperparams.get(a, {}))
             for a in available_aligners
         )
-        grid_type = "probe_grid_btl" if args.transfer_mode == "best-to-last" else "probe_grid"
+        grid_type = "probe_grid" + _mode_suffix(args.transfer_mode)
         out_pg = os.path.join(pair_out_dir, f"{grid_type}_align_{align_ds}_{aligner_suffix}.json")
         _save_json(out_pg, pg)
 
@@ -1115,7 +1759,7 @@ def _hparams_from_label(label):
 
 
 def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_note,
-                      cross_datasets=None):
+                      cross_datasets=None, mode_sfx=""):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1178,7 +1822,11 @@ def _make_summary_fig(eval_ds, grid_type, results_dir, select_variant, hparam_no
             ax.set_axisbelow(True)
 
             # load aligner-independent native curves
-            native_curves_path = os.path.join(pair_dir, f"native_curves_{eval_ds}.json")
+            # mode_sfx must match phase_evaluate's writer (f"native_curves{mode_sfx}_..."):
+            # without it every best-to-last cell reads as "(missing)" and the whole
+            # figure comes out blank.
+            native_curves_path = os.path.join(
+                pair_dir, f"native_curves{mode_sfx}_{eval_ds}.json")
             if not os.path.exists(native_curves_path):
                 ax.set_title(f"→ {tgt_short}\n(missing)", fontsize=8, color="red")
                 ax.axis("off")
@@ -1277,7 +1925,7 @@ def phase_summary(args):
     # sep.transfer.sweep_summary, not here.
     hyperparams = _build_hyperparams(args)
     run_tag = _aligner_tag("ridge", hyperparams["ridge"])
-    grid_type = "probe_grid_btl" if args.transfer_mode == "best-to-last" else "probe_grid"
+    grid_type = "probe_grid" + _mode_suffix(args.transfer_mode)
     selector = make_run_variant_selector(grid_type, hyperparams)
     hparam_note = f"aligner hyperparams: {run_tag}"
 
@@ -1290,7 +1938,8 @@ def phase_summary(args):
     for eval_ds in args.datasets:
         cross_ds_list = cross_map.get(eval_ds) or None
         fig = _make_summary_fig(eval_ds, grid_type, results_dir,
-                                selector, hparam_note, cross_datasets=cross_ds_list)
+                                selector, hparam_note, cross_datasets=cross_ds_list,
+                                mode_sfx=_mode_suffix(args.transfer_mode))
         stem = f"summary_{eval_ds}_{grid_type}_{run_tag}"
         for ext in ("pdf", "png"):
             path = os.path.join(plots_dir, f"{stem}.{ext}")
@@ -1335,16 +1984,25 @@ def phase_summary(args):
     # Auto-generate timing table only when the T1/T2 inputs are actually present.
     # An existing-but-empty data_generation_timing/ would otherwise yield an empty
     # timing_collect_data.json and timing tables with blank T1/T2 columns.
-    data_gen_timing_dir = os.path.join(args.out_dir, "data_generation_timing")
+    #
+    # Written to timing/transfer2_auto/, NOT timing/, on purpose: T4/T5 here come from
+    # this run's own timing.json (uncontrolled env, single cold fit, and probe_cache is
+    # empty unless phase 3 ran), so these tables must not overwrite the paper ones that
+    # slurm/run_time_fits.sh writes to timing/.  See README_timing.md.
+    timing_dir = os.path.join(args.out_dir, "timing")
+    data_gen_timing_dir = os.path.join(timing_dir, "data_generation_timing")
     pair_list = os.path.join(_repo_root(), "slurm", "inputs", "pair_list.txt")
     timing_inputs = glob.glob(os.path.join(data_gen_timing_dir, "*.json"))
     if timing_inputs and os.path.exists(pair_list):
         from sep.transfer.make_timing_table import build_tables
+        auto_dir = os.path.join(timing_dir, "transfer2_auto")
+        os.makedirs(auto_dir, exist_ok=True)
         timing_json = os.path.join(args.out_dir, "timing.json")
-        out_json = os.path.join(args.out_dir, "timing_collect_data.json")
-        build_tables(data_gen_timing_dir, timing_json, pair_list, out_json, args.out_dir,
+        out_json = os.path.join(auto_dir, "timing_collect_data.json")
+        build_tables(data_gen_timing_dir, timing_json, pair_list, out_json, auto_dir,
                      datasets=tuple(args.datasets))
-        print(f"Timing tables saved to {args.out_dir}")
+        print(f"Timing tables saved to {auto_dir} "
+              f"(uncontrolled; paper tables come from slurm/run_time_fits.sh)")
     else:
         if not os.path.isdir(data_gen_timing_dir):
             print(f"  [timing table] skipped: {data_gen_timing_dir} not found")
@@ -1367,7 +2025,7 @@ def _common_args(p):
                    default=[50, 100, 200, 400, 800, 1500])
     p.add_argument("--n-eval", type=int, default=500)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--alpha", type=float, default=1e3)
+    p.add_argument("--alpha", type=float, default=1e4)
     p.add_argument("--lambda-val", type=float, default=1.0,
                    help="lambda hyperparameter for the e2_rstar aligner")
     p.add_argument("--force", action="store_true",
@@ -1381,8 +2039,30 @@ def _common_args(p):
     p.add_argument("--cross-align-dataset", nargs="*", default=[],
                    help="eval_ds:align_ds mappings, e.g. squad:nq nq:squad")
     p.add_argument("--transfer-mode", default="best-to-best",
-                   choices=["best-to-best", "best-to-last"],
-                   help="which target layer to transfer to: best (default) or last layer")
+                   choices=["best-to-best", "best-to-last", "best-to-best-sub",
+                            "best-to-align"],
+                   help="which target layer to transfer to: its best layer picked "
+                        "on the full 1500-row pool (best-to-best, default), its "
+                        "last layer (best-to-last), its best layer picked with "
+                        "only --sub-n target labels (best-to-best-sub), or the "
+                        "layer whose alignment to the source reconstructs it best "
+                        "(best-to-align, zero target labels).  The source layer is "
+                        "always its full-pool best layer.")
+    p.add_argument("--sub-n", type=int, default=150,
+                   help="best-to-best-sub: target SE labels spent on layer selection")
+    p.add_argument("--sub-folds", type=int, default=5,
+                   help="best-to-best-sub: CV folds over those --sub-n rows")
+    p.add_argument("--align-sel-aligner", default="ridge",
+                   choices=["ridge", "procrustes"],
+                   help="best-to-align: aligner used to score candidate layers "
+                        "(ridge uses --alpha)")
+    p.add_argument("--align-sel-holdout", type=float, default=0.2,
+                   help="best-to-align: fraction of selection rows held out to "
+                        "score the reconstruction error")
+    p.add_argument("--align-sel-stride", type=int, default=1,
+                   help="best-to-align: score every k-th target layer (1 = all)")
+    p.add_argument("--align-sel-n", type=int, default=0,
+                   help="best-to-align: cap on selection rows (0 = all leak-free rows)")
 
 
 def main():
@@ -1391,6 +2071,14 @@ def main():
 
     p1 = sub.add_parser("probe_cache", help="Phase 1: fit probes for all models")
     _common_args(p1)
+
+    p15 = sub.add_parser("tgt_layer_cache",
+                         help="Phase 1.5 (best-to-align only): pick each pair's "
+                              "target layer with zero target labels")
+    _common_args(p15)
+    p15.add_argument("--pair-list",
+                     default=os.path.join(_repo_root(), "slurm", "inputs", "pair_list.txt"),
+                     help="text file: src_model tgt_model")
 
     p2 = sub.add_parser("align_cache", help="Phase 2: fit alignment matrices")
     _common_args(p2)
@@ -1422,6 +2110,8 @@ def main():
 
     if args.phase == "probe_cache":
         phase_probe_cache(args)
+    elif args.phase == "tgt_layer_cache":
+        phase_tgt_layer_cache(args)
     elif args.phase == "align_cache":
         phase_align_cache(args)
     elif args.phase == "evaluate":

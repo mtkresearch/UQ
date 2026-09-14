@@ -298,7 +298,7 @@ def cli():
         # Save timing summary to JSON in the run output directory, even if a later
         # stage crashed: T1/T2 are stamped well before the end of main_compute, and
         # discarding them would mean re-running the whole GPU pass for nothing.
-        # run_collect_timing.sh harvests these into transfer_v2/data_generation_timing/
+        # run_collect_timing.sh harvests these into transfer_v2/timing/data_generation_timing/
         # as T1 (answer sampling) and T2 (semantic clustering).
         try:
             timing_path = os.path.join(wandb.run.dir, 'timing.json')
