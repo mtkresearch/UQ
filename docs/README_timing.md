@@ -3,12 +3,12 @@
 Builds the paper's target-trained vs. transfer wall-clock table.
 
 Every timing artefact lives in
-**`/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/timing`** (called `$TIMING` below).
+**`$SEP_SCRATCH/transfer_v2/timing`** (called `$TIMING` below).
 
 ## The two commands
 
 ```bash
-TIMING=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/timing
+TIMING=$SEP_SCRATCH/transfer_v2/timing
 
 # 1. T1/T2 — GPU, hours.  Only needed if the T1/T2 numbers must change.
 nohup bash slurm/run_collect_timing.sh > $TIMING/collect_timing.log 2>&1 &

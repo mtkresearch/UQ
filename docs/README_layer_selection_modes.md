@@ -118,7 +118,7 @@ No hidden states are re-loaded; everything is read from stored artifacts.
 | L_b2a | `transfer_v4_b2a/tgt_layers/<eval_ds>/<pair>/<align_ds>_b2a.json` → `tgt_best_layer` |
 | transferred AUROC | `<root>/results/<eval_ds>/<pair>/probe_grid<sfx>_align_<align_ds>_ridge_a1e4.json` → `curveB_ridge` at `n_grid == 1500` |
 
-Everything is under `/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4/`. Result
+Everything is under `$SEP_SCRATCH/transfer_v4/`. Result
 roots: `b2b` = `transfer_v4_b2b`, `btl` = `transfer_v4_btl`, `bbs` = `transfer_v4_bbs`,
 `b2a` = `transfer_v4_b2a`; the four modes share one phase-1 probe set in
 `_probes_shared/probes` (`bbs` holds a copy of it, since it writes `sub_best_layer`

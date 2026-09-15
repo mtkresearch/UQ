@@ -28,7 +28,7 @@
 #
 # Usage:
 #   nohup bash slurm/run_transfer_v4_all.sh \
-#     >> /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4/run_all.log 2>&1 &
+#     >> "$SEP_SCRATCH/transfer_v4/run_all.log" 2>&1 &
 #
 #   # one mode only, or a different order:
 #   MODES="best-to-align" bash slurm/run_transfer_v4_all.sh
@@ -41,7 +41,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-OUT_ROOT=${OUT_ROOT:-/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4}
+[ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
+
+OUT_ROOT=${OUT_ROOT:-${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v4}
 # Cheapest-first (see the note above).  In v3 this was reordered to put
 # best-to-align first because the cheap trees were seeded and only cross-align was
 # outstanding; in v4 nothing is seeded, so putting the multi-hour phase 1.5 last

@@ -5,7 +5,7 @@
 #
 # Usage:
 #   nohup bash slurm/run_collect_timing.sh \
-#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/collect_timing.log 2>&1 &
+#     > "$SEP_SCRATCH/collect_timing.log" 2>&1 &
 #
 #   # one or more datasets (default: all three)
 #   bash slurm/run_collect_timing.sh trivia_qa
@@ -30,10 +30,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+[ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
+
 export WANDB_MODE=offline
 export WANDB_ENT="${WANDB_ENT:-offline}"
 
-SCRATCH_BASE="/proj/MR_dataset/mtk53728/UQ/sep_scratch"
+SCRATCH_BASE="${SEP_SCRATCH:?set SEP_SCRATCH in .env}"
 TIMING="$SCRATCH_BASE/transfer_v2/timing"   # every timing artefact lives here
 NUM_SAMPLES=100
 KEEP_RUN_DIR="${KEEP_RUN_DIR:-0}"

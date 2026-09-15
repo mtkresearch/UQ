@@ -5,7 +5,7 @@ Why this exists
 The timings recorded inside `transfer2.py` runs are not comparable across datasets:
 
   * SQuAD/NQ ran under the repo conda env (numpy 1.26 + MKL); TriviaQA ran under
-    /build_bak/mtk53686/semantic-entropy-probes/.venv (numpy 2.5 + OpenBLAS).  On the
+    a separate venv with numpy 2.5 + OpenBLAS.  On the
     same host the same ridge grid costs 26.4 s vs 43.6 s -- a 1.65x env-only gap.
   * Neither run pinned BLAS thread counts, so the shared 64-core host's load added
     another few-fold swing.
@@ -45,16 +45,16 @@ alpha needed for the table is measured (default 1e4), not the whole sweep, and n
 Usage
 -----
     python -m sep.transfer.time_fits extract \
-        --cache-root squad=/proj/.../transfer_v2 \
-        --cache-root nq=/proj/.../transfer_v2 \
-        --cache-root trivia_qa=/build_bak/.../transfer_v2_trivia_qa \
-        --work-dir /proj/.../transfer_v2/timing/fit_timing
+        --cache-root squad=$SEP_SCRATCH/transfer_v2 \
+        --cache-root nq=$SEP_SCRATCH/transfer_v2 \
+        --cache-root trivia_qa=$SEP_SCRATCH/transfer_v2_trivia_qa \
+        --work-dir $SEP_SCRATCH/transfer_v2/timing/fit_timing
 
     python -m sep.transfer.time_fits time \
-        --work-dir /proj/.../transfer_v2/timing/fit_timing \
+        --work-dir $SEP_SCRATCH/transfer_v2/timing/fit_timing \
         --pair-list slurm/inputs/pair_list.txt \
         --datasets squad nq trivia_qa --n 1500 --alpha 1e4 --repeats 3 \
-        --out-json /proj/.../transfer_v2/timing/timing_fits.json
+        --out-json $SEP_SCRATCH/transfer_v2/timing/timing_fits.json
 """
 import argparse
 import json

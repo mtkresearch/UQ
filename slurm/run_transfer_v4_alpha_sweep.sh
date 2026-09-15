@@ -46,7 +46,7 @@
 #
 # Usage:
 #   nohup bash slurm/run_transfer_v4_alpha_sweep.sh \
-#     >> /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4/alpha_sweep.log 2>&1 &
+#     >> "$SEP_SCRATCH/transfer_v4/alpha_sweep.log" 2>&1 &
 #
 #   # narrower / different grid:
 #   ALPHAS="1e3 1e4 1e5" bash slurm/run_transfer_v4_alpha_sweep.sh
@@ -59,10 +59,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+[ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
+
 # The sweep runs for hours off the working tree; a checkout mid-run would swap the
 # code under it and delete files untracked on the other branch.  Re-checked before
 # every alpha, as in the v2 sweep.
-EXPECTED_BRANCH=${EXPECTED_BRANCH:-exp/intra-family-transfer}
+EXPECTED_BRANCH=${EXPECTED_BRANCH:-clean/v4-pipeline}
 check_branch() {
     local branch
     branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)"
@@ -74,12 +76,10 @@ check_branch() {
 check_branch
 
 export WANDB_MODE=offline
-# This repo's src, NOT /build_bak/UQ/UQ-transfer/src -- that copy is owned by
-# another account and predates convention D entirely.
-export PYTHONPATH="$REPO_ROOT/src":/build_bak/UQ/python_packages
-PYTHON=${PYTHON:-/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python}
+export PYTHONPATH="$REPO_ROOT/src"
+PYTHON=${PYTHON:-${SEP_PYTHON:-python}}
 
-OUT_ROOT=${OUT_ROOT:-/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4}
+OUT_ROOT=${OUT_ROOT:-${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v4}
 MODE=${MODE:-best-to-best}
 FORCE_MODE=${FORCE_MODE:-0}
 SUMMARY_ONLY=${SUMMARY_ONLY:-0}

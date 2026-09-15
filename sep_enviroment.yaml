@@ -169,6 +169,7 @@ dependencies:
   - zlib=1.2.13=h5eee18b_0
   - zstd=1.5.5=hc292b87_0
   - pip:
+    - matplotlib-venn==1.1.2
     - absl-py==2.0.0
     - accelerate==0.25.0
     - annotated-types==0.6.0

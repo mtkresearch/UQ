@@ -17,11 +17,13 @@
 #
 # Usage:
 #   nohup bash slurm/run_time_fits.sh \
-#     > /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2/timing/time_fits.log 2>&1 &
+#     > "$SEP_SCRATCH/transfer_v2/timing/time_fits.log" 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+[ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
 
 # Pin BLAS threads.  Without this the shared 64-core host's load swings the numbers
 # by several-fold, which is exactly what made the original timings incomparable.
@@ -33,7 +35,7 @@ export NUMEXPR_NUM_THREADS=8
 # Pin the interpreter too, rather than relying on whichever env happens to be active.
 # `sep` is editable-installed only in se_probes, and comparability across the three
 # datasets is exactly what this script exists to establish -- numpy 1.26 + MKL here.
-PYTHON="${PYTHON:-/proj/gpu_mtk53728/miniconda3/envs/se_probes/bin/python}"
+PYTHON="${PYTHON:-${SEP_PYTHON:-python}}"
 if ! "$PYTHON" -c "import sep" 2>/dev/null; then
     echo "ERROR: $PYTHON cannot import sep; set PYTHON=<interpreter with sep installed>"
     exit 1
@@ -41,15 +43,15 @@ fi
 echo "Interpreter: $PYTHON"
 "$PYTHON" -c "import numpy; print('numpy', numpy.__version__)"
 
-OUT=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2
+OUT="${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v2"
 TIMING="$OUT/timing"          # every timing artefact lives here
 WORK="$TIMING/fit_timing"
 mkdir -p "$TIMING"
 DATASETS=(squad nq trivia_qa)
 
 # transfer2 --out-dir per dataset (TriviaQA was run under a different out-dir).
-SQUAD_NQ_ROOT=/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v2
-TRIVIA_ROOT=/build_bak/UQ/UQ-transfer/sep_scratch/transfer_v2_trivia_qa
+SQUAD_NQ_ROOT="$OUT"
+TRIVIA_ROOT="${SEP_SCRATCH}/transfer_v2_trivia_qa"
 
 echo "=========================================="
 echo "Phase 1: extract best-layer features  $(date '+%H:%M:%S')"

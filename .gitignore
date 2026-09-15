@@ -140,3 +140,5 @@ dmypy.json
 */wandb/
 
 .env
+sep_scratch/
+slurm/inputs/model_paths.txt

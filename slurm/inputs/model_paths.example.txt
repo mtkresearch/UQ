@@ -1,0 +1,10 @@
+# Map each (dataset, model) to its validation_generations.pkl path.
+# Copy this file to model_paths.txt and fill in your local paths.
+# model_paths.txt is not committed (.gitignore).
+#
+# Format: <dataset>  <model>  <path>
+#
+# squad  llama-3.1-8b  /your/scratch/.../validation_generations.pkl
+# squad  qwen3-8b      /your/scratch/.../validation_generations.pkl
+# nq     llama-3.1-8b  /your/scratch/.../validation_generations.pkl
+# nq     qwen3-8b      /your/scratch/.../validation_generations.pkl

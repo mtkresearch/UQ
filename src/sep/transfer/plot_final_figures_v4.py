@@ -53,7 +53,7 @@ linestyle has to mean "mode" and nothing else.
 
 EXACTLY WHICH FILES ARE READ
 ----------------------------
-Source roots, all under /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4:
+Source roots, all under $SEP_SCRATCH/transfer_v4 (set SEP_SCRATCH in .env):
   transfer_v4_b2b/results   best   (files have no mode infix)
   transfer_v4_btl/results   btl
   transfer_v4_bbs/results   bbs
@@ -152,7 +152,7 @@ _SHORT = {
     "llama-3.2-1b": "Llama-3.2-1B",
 }
 
-V4 = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4"
+V4 = os.path.join(os.getenv("SEP_SCRATCH", ""), "transfer_v4")
 
 # One self-contained run per transfer mode.  Unlike v2 -- where best-to-best was
 # stitched together out of three roots (pooled / legacy / trivia_qa) -- each v4 run
@@ -209,7 +209,7 @@ MODE_ORDER = list(MODES)          # drawing + naming order, independent of CLI o
 MODE_ALIAS = {m: m for m in MODE_ORDER}
 MODE_ALIAS.update({"b2b": "best", "b2l": "btl", "b2b_sub": "bbs"})
 
-OUT_DIR = "/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4_final"
+OUT_DIR = os.path.join(os.getenv("SEP_SCRATCH", ""), "transfer_v4_final")
 
 
 def mode_infix(mode):

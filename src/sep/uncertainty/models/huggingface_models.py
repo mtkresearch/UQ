@@ -25,11 +25,11 @@ from sep.uncertainty.models.base_model import STOP_SEQUENCES
 def resolve_model_path(model_name, hub_org):
     """Prefer a locally downloaded snapshot over a Hub id.
 
-    Looks under `$SEP_MODELS_DIR` (default `/proj/MR_dataset/models`) for a
-    directory named exactly `model_name`; falls back to `<hub_org>/<model_name>`
-    for a normal Hub download.
+    Looks under `$SEP_MODELS_DIR` for a directory named exactly `model_name`;
+    falls back to `<hub_org>/<model_name>` for a normal Hub download.
+    Set SEP_MODELS_DIR in .env to point at your local model weights.
     """
-    models_dir = os.getenv('SEP_MODELS_DIR', '/proj/MR_dataset/models')
+    models_dir = os.getenv('SEP_MODELS_DIR', '')
     local = os.path.join(models_dir, model_name)
     return local if os.path.isdir(local) else f'{hub_org}/{model_name}'
 

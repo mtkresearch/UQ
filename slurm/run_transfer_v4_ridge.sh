@@ -67,11 +67,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Load local paths from .env if present
+[ -f "$REPO_ROOT/.env" ] && source "$REPO_ROOT/.env"
+
 export WANDB_MODE=offline
-# This repo's src, NOT /build_bak/UQ/UQ-transfer/src -- that copy is owned by
-# another account and predates the convention-D fix entirely.
-export PYTHONPATH="$REPO_ROOT/src":/build_bak/UQ/python_packages
-PYTHON=${PYTHON:-/build_bak/mtk53686/semantic-entropy-probes/.venv/bin/python}
+export PYTHONPATH="$REPO_ROOT/src"
+PYTHON=${PYTHON:-${SEP_PYTHON:-python}}
 
 MODE=${MODE:?set MODE to one of best-to-best best-to-last best-to-best-sub best-to-align}
 case "$MODE" in
@@ -82,7 +83,7 @@ case "$MODE" in
     *) echo "unknown MODE '$MODE'" >&2; exit 2 ;;
 esac
 
-OUT_ROOT=${OUT_ROOT:-/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_v4}
+OUT_ROOT=${OUT_ROOT:-${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v4}
 OUT=${OUT:-"$OUT_ROOT/transfer_v4_$TAG"}
 PROBE_SRC=${PROBE_SRC:-}
 PHASE1_ONLY=${PHASE1_ONLY:-0}

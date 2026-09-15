@@ -2,8 +2,8 @@
 
 Usage:
     python -m sep.collect_timing \
-        --gen-base /proj/MR_dataset/mtk53728/UQ/sep_scratch \
-        --transfer-base /proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_results
+        --gen-base "$SEP_SCRATCH" \
+        --transfer-base "$SEP_SCRATCH/transfer_results"
 """
 import argparse
 import glob
@@ -68,9 +68,9 @@ def collect_transfer_timings(base):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--gen-base', default='/proj/MR_dataset/mtk53728/UQ/sep_scratch')
+    p.add_argument('--gen-base', default=os.getenv('SEP_SCRATCH', ''))
     p.add_argument('--transfer-base',
-                   default='/proj/MR_dataset/mtk53728/UQ/sep_scratch/transfer_results')
+                   default=os.path.join(os.getenv('SEP_SCRATCH', ''), 'transfer_results'))
     p.add_argument('--out', default='timing_summary.json',
                    help='Output JSON path for the full summary table')
     args = p.parse_args()
