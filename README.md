@@ -37,8 +37,8 @@ export WANDB_ENT=offline
 
 ## Step 1: Generate data
 
-Each model needs its own generation run. Source and target must use the same
-`--dataset`, `--num_samples`, and `--random_seed` so their rows align.
+Each model needs its own generation run. All models on the same dataset must use
+the same `--num_samples` and `--random_seed` so their rows align.
 
 **Single GPU:**
 
@@ -57,9 +57,9 @@ bash slurm/run_multigpu.sh --config configs/model/qwen3-8b.yaml --num_gpus 4
 ```
 
 Shards the run across GPUs, merges, then runs clustering in one pass.
-Merged output is printed at the end as *"Merged run + measures under …"*.
+Merged output path is printed at the end as *"Merged run + measures under …"*.
 
-To regenerate all models in batch:
+**All models in batch:**
 
 ```bash
 bash slurm/regen_all.sh
@@ -67,50 +67,94 @@ bash slurm/regen_all.sh
 
 Available model configs: `ls configs/model/`.
 
-## Step 2: Run transfer (v4)
+## Step 2: Register model paths
 
-The v4 pipeline uses normalisation convention D and a per-dataset eval/pool
-split. It runs four transfer modes: `best-to-best`, `best-to-last`,
-`best-to-best-sub`, `best-to-align`.
+Edit `slurm/inputs/model_paths.txt` to point each `(dataset, model)` at its
+`validation_generations.pkl`:
 
-**Run all modes:**
+```
+# dataset  model       path
+squad       qwen3-1.7b  /path/to/.../validation_generations.pkl
+squad       qwen3-8b    /path/to/.../validation_generations.pkl
+nq          qwen3-1.7b  /path/to/.../validation_generations.pkl
+nq          qwen3-8b    /path/to/.../validation_generations.pkl
+```
+
+Transfer pairs are defined in `slurm/inputs/pair_list.txt` (21 pairs).
+
+## Step 3: Run transfer (v4)
 
 ```bash
 nohup bash slurm/run_transfer_v4_all.sh \
   >> /path/to/sep_scratch/transfer_v4/run_all.log 2>&1 &
 ```
 
-Output tree under `$OUT_ROOT` (default: `sep_scratch/transfer_v4/`):
-
-```
-_probes_shared/probes/     phase 1, shared across all modes
-transfer_v4_b2b/           best-to-best
-transfer_v4_btl/           best-to-last
-transfer_v4_bbs/           best-to-best-sub
-transfer_v4_b2a/           best-to-align
-```
-
-Each mode directory contains `probes/`, `alignments/`, `results/`,
-`summary_plots/`, `timing.json`.
-
-**Run a single mode:**
+Override the output root:
 
 ```bash
-MODES="best-to-align" bash slurm/run_transfer_v4_all.sh
+OUT_ROOT=/your/path bash slurm/run_transfer_v4_all.sh
 ```
 
-**Alpha sweep (hyperparameter search):**
+Output tree under `$OUT_ROOT`:
+
+```
+_probes_shared/probes/
+  <dataset>/<model>.pkl              SE probe per (model, dataset): best layer, fitted probes, labels
+
+transfer_v4_b2b/
+  alignments/<dataset>/<src>_to_<tgt>/
+    ridge_a1e4_n<N>.pkl              alignment matrix M and bias b at each sample size N
+
+  results/<dataset>/<src>_to_<tgt>/
+    probe_grid_align_<dataset>_ridge_a1e4.json   AUROC vs N curve (transferred probe)
+    predictions_align_<dataset>_ridge_a1e4.json  per-sample predictions at each N
+    native_curves_<dataset>.json                 AUROC of source/target native probes (baselines)
+    native_preds_<dataset>.json                  per-sample predictions of native probes
+
+  summary_plots/
+    summary_<dataset>_probe_grid_ridge_a1e4.{pdf,png}   main figure: AUROC vs N for all pairs
+    venn_ridge_a1e4/                                     Venn error decomposition figures
+
+  timing.json                        wall-clock time per phase
+```
+
+The pipeline has four phases, each caching its outputs to disk. Any phase can be
+re-run individually without redoing earlier work:
+
+| Phase | Subcommand | What it does |
+|---|---|---|
+| 1 | `probe_cache` | Layer search + fit SE probes for every (model, dataset) |
+| 2 | `align_cache` | Fit target→source linear map for every pair |
+| 3 | `evaluate` | Apply source probe to aligned target features → AUROC |
+| 4 | `summary` | Produce all figures |
+
+Example — re-run only figures after a plot change:
+
+```bash
+python -m sep.transfer.transfer2 evaluate --out-dir .../transfer_v4_b2b --token slt --datasets squad nq --alpha 1e4
+python -m sep.transfer.transfer2 summary  --out-dir .../transfer_v4_b2b --token slt --datasets squad nq --alpha 1e4
+```
+
+## Other experiments
+
+**Layer selection modes** — compare four strategies for choosing the target layer
+(`best-to-best`, `best-to-last`, `best-to-best-sub`, `best-to-align`):
+
+```bash
+MODES="best-to-best best-to-last best-to-best-sub best-to-align" \
+  bash slurm/run_transfer_v4_all.sh
+```
+
+Each mode writes to its own subdirectory (`transfer_v4_b2b/`, `transfer_v4_btl/`,
+`transfer_v4_bbs/`, `transfer_v4_b2a/`) and never overwrites another.
+
+**Alpha sweep** — search over ridge regularisation strength:
 
 ```bash
 bash slurm/run_transfer_v4_alpha_sweep.sh
 ```
 
-## Model pairs
-
-Transfer pairs are defined in `slurm/inputs/pair_list.txt`.
-Model paths are in `slurm/inputs/model_paths.txt`.
-
 ## Documentation
 
-See `docs/` for detailed notes on the pipeline, normalisation convention,
-layer selection modes, and timing methodology.
+See `docs/` for detailed notes on transfer modes, normalisation convention,
+timing methodology, and Venn error decomposition.
