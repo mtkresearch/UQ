@@ -17,7 +17,7 @@
 #
 # Usage:
 #   nohup bash slurm/run_time_fits.sh \
-#     > "$SEP_SCRATCH/transfer_v2/timing/time_fits.log" 2>&1 &
+#     > "$SEP_SCRATCH/transfer_v4/timing/time_fits.log" 2>&1 &
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,23 +43,19 @@ fi
 echo "Interpreter: $PYTHON"
 "$PYTHON" -c "import numpy; print('numpy', numpy.__version__)"
 
-OUT="${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v2"
-TIMING="$OUT/timing"          # every timing artefact lives here
+TIMING="${SEP_SCRATCH:?set SEP_SCRATCH in .env}/transfer_v4/timing"
+SHARED_PROBES="${SEP_SCRATCH}/transfer_v4/_probes_shared"
 WORK="$TIMING/fit_timing"
 mkdir -p "$TIMING"
 DATASETS=(squad nq trivia_qa)
-
-# transfer2 --out-dir per dataset (TriviaQA was run under a different out-dir).
-SQUAD_NQ_ROOT="$OUT"
-TRIVIA_ROOT="${SEP_SCRATCH}/transfer_v2_trivia_qa"
 
 echo "=========================================="
 echo "Phase 1: extract best-layer features  $(date '+%H:%M:%S')"
 echo "=========================================="
 "$PYTHON" -m sep.transfer.time_fits extract \
-    --cache-root "squad=$SQUAD_NQ_ROOT" \
-    --cache-root "nq=$SQUAD_NQ_ROOT" \
-    --cache-root "trivia_qa=$TRIVIA_ROOT" \
+    --cache-root "squad=$SHARED_PROBES" \
+    --cache-root "nq=$SHARED_PROBES" \
+    --cache-root "trivia_qa=$SHARED_PROBES" \
     --work-dir "$WORK" \
     --token slt
 
