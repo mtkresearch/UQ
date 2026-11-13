@@ -10,7 +10,7 @@ def load_ds(dataset_name, seed, add_options=None):
     """Load dataset."""
     train_dataset, validation_dataset = None, None
     if dataset_name == "squad":
-        dataset = datasets.load_dataset("squad_v2")
+        dataset = datasets.load_dataset("rajpurkar/squad_v2")
         train_dataset = dataset["train"]
         validation_dataset = dataset["validation"]
 
@@ -31,7 +31,7 @@ def load_ds(dataset_name, seed, add_options=None):
         validation_dataset = _validation_dataset + train_dataset
 
     elif dataset_name == 'nq':
-        dataset = datasets.load_dataset("nq_open")
+        dataset = datasets.load_dataset("google-research-datasets/nq_open")
         train_dataset = dataset["train"]
         validation_dataset = dataset["validation"]
         md5hash = lambda s: str(int(hashlib.md5(s.encode('utf-8')).hexdigest(), 16))
