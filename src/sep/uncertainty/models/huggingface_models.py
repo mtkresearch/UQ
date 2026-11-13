@@ -46,20 +46,28 @@ class StoppingCriteriaSub(StoppingCriteria):
             self.stops = [torch.tensor(self.tokenizer.encode(i)).to('cuda') for i in self.stops]
             print(self.stops)
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor):
-        del scores
+    def _row_done(self, row):
         for stop in self.stops:
             if self.match_on == 'text':
-                generation = self.tokenizer.decode(input_ids[0][self.initial_length:], skip_special_tokens=False)
+                generation = self.tokenizer.decode(row[self.initial_length:], skip_special_tokens=False)
                 match = stop in generation
             elif self.match_on == 'tokens':
                 # Can be dangerous due to tokenizer ambiguities.
-                match = stop in input_ids[0][-len(stop):]
+                match = stop in row[-len(stop):]
             else:
                 raise
             if match:
                 return True
         return False
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs):
+        # Per-row decision (shape (batch,)). Checking only row 0 made a batched
+        # `num_return_sequences` call keep every other sample running past its
+        # own stop word until row 0 stopped. For batch size 1 this is identical
+        # to the previous single-bool behaviour.
+        del scores
+        return torch.tensor([self._row_done(row) for row in input_ids],
+                            dtype=torch.bool, device=input_ids.device)
 
 
 def remove_split_layer(device_map_in):
@@ -495,11 +503,15 @@ class HuggingfaceModel(BaseModel):
         stop_at = len(answer)
         sliced_answer = answer
         if self.stop_sequences is not None:
-            for stop in self.stop_sequences:
-                if answer.endswith(stop):
-                    stop_at = len(answer) - len(stop)
-                    sliced_answer = answer[:stop_at]
-                    break
+            # Cut at the EARLIEST stop sequence anywhere in the answer, not only a
+            # trailing one: a sample in a batched generate can run past its stop
+            # word (and after it finishes, pad tokens follow), so "endswith" left
+            # text like 'January\n\nQuestion: what' in the semantic-entropy samples.
+            hits = [answer.find(stop) for stop in self.stop_sequences
+                    if stop and stop in answer]
+            if hits:
+                stop_at = min(hits)
+                sliced_answer = answer[:stop_at]
             if not all([stop not in sliced_answer for stop in self.stop_sequences]):
                 error_msg = 'Error: Stop words not removed successfully!'
                 error_msg += f'Answer: >{answer}< '
