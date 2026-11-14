@@ -142,3 +142,4 @@ dmypy.json
 .env
 sep_scratch/
 slurm/inputs/model_paths.txt
+slurm/inputs/model_paths.txt.lock

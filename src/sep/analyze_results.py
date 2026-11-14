@@ -113,6 +113,16 @@ def analyze_run(
     # Iterate through the dictionary and compute additional metrics for each measure.
     for measure_name, measure_values in rum.items():
         logging.info('Computing for uncertainty measure `%s`.', measure_name)
+        # analyze_run is a post-hoc summary that runs after uncertainty_measures.pkl
+        # is saved. A single -inf token log-likelihood (seen ~1 in 20k samples) makes
+        # the likelihood-based measures (regular_entropy, ...) infinite and sklearn's
+        # roc_curve raises, which used to fail the whole run. Skip such a measure
+        # instead; the saved data and the other measures are unaffected.
+        n_bad = int((~np.isfinite(np.asarray(measure_values, dtype=float))).sum())
+        if n_bad:
+            logging.warning('Skipping summary for `%s`: %d non-finite value(s).',
+                            measure_name, n_bad)
+            continue
 
         # Validation accuracy.
         validation_is_falses = [
